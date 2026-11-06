@@ -46,7 +46,7 @@
   function show(){
     const root=$("#root"); root.innerHTML="";
     const tabs=el("div","tabs");
-    [["dashboard","Dashboard"],["report","Report"],["timesheet","Timesheet"],["team","Team"],["audit","Activity log"],["settings","Settings"]].forEach(([k,label])=>{
+    [["dashboard","Dashboard"],["report","Report"],["timesheet","Timesheet"],["team","Team"],["photos","Photos"],["audit","Activity log"],["settings","Settings"]].forEach(([k,label])=>{
       const t=el("button","tab"+(S.tab===k?" on":""),label); t.onclick=()=>{S.tab=k;show();}; tabs.appendChild(t);
     });
     root.appendChild(tabs);
@@ -55,6 +55,7 @@
     else if(S.tab==="report")renderReport(body);
     else if(S.tab==="timesheet")renderTimesheet(body);
     else if(S.tab==="team")renderTeam(body);
+    else if(S.tab==="photos")renderPhotos(body);
     else if(S.tab==="audit")renderAudit(body);
     else renderSettings(body);
   }
@@ -221,6 +222,27 @@
     act.onclick=async()=>{await api("/api/admin/employees",{method:"POST",body:JSON.stringify({id:e.id,name:name.value,pin:pin.value,email:email.value.trim(),rate:rate.value,ot_rate:ot.value===""?null:ot.value,ot_threshold:thr.value,active:e.active?false:true})});show();};
     box.appendChild(save);box.appendChild(act);actions.appendChild(box);row.appendChild(actions);
     return row;
+  }
+
+  /* ---------- photos ---------- */
+  async function renderPhotos(b){
+    loadingInto(b);
+    const ph=await api("/api/admin/photos");
+    b.innerHTML="";
+    const note=el("p","muted small");note.textContent="Front-camera photo from each clock in/out, most recent first. Stored on the tablet only, auto-deleted after 60 days.";b.appendChild(note);
+    if(!ph.length){const e=el("div","emptyroster");e.style.margin="16px 0";e.textContent="No punch photos yet. They appear here once people clock in with photos turned on (Settings → Store & wages).";b.appendChild(e);return;}
+    const grid=el("div");grid.style.display="grid";grid.style.gridTemplateColumns="repeat(auto-fill,minmax(150px,1fr))";grid.style.gap="12px";grid.style.marginTop="14px";
+    ph.forEach(p=>{
+      const c=el("div");c.style.border="1px solid var(--line)";c.style.borderRadius="12px";c.style.overflow="hidden";c.style.background="var(--surface)";
+      const img=el("img");img.src="/data/photos/"+encodeURIComponent(p.file);img.loading="lazy";img.alt="";
+      img.style.width="100%";img.style.aspectRatio="4/3";img.style.objectFit="cover";img.style.display="block";img.style.background="var(--surface-2)";
+      const cap=el("div");cap.style.padding="8px 10px";
+      const when=new Date(p.ts*1000).toLocaleString(undefined,{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"});
+      cap.innerHTML='<div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+p.name+'</div>'+
+        '<div class="small" style="margin-top:3px">'+(p.dir==="in"?'<span class="pill in">IN</span>':'<span class="pill ot">OUT</span>')+' <span class="muted">'+when+'</span></div>';
+      c.appendChild(img);c.appendChild(cap);grid.appendChild(c);
+    });
+    b.appendChild(grid);
   }
 
   /* ---------- audit ---------- */

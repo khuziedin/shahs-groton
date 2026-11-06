@@ -498,6 +498,23 @@ def admin_employees():
     con.commit()
     return jsonify({"ok": True})
 
+@app.route("/api/admin/photos")
+def admin_photos():
+    require_admin()
+    con = db()
+    rows = con.execute("""SELECT p.clock_in, p.clock_out, p.photo, p.photo_out, e.name
+                          FROM punches p JOIN employees e ON e.id=p.emp_id
+                          WHERE p.photo IS NOT NULL OR p.photo_out IS NOT NULL
+                          ORDER BY p.clock_in DESC LIMIT 80""").fetchall()
+    out = []
+    for p in rows:
+        if p["photo"]:
+            out.append({"name": p["name"], "ts": p["clock_in"], "dir": "in", "file": p["photo"]})
+        if p["photo_out"]:
+            out.append({"name": p["name"], "ts": p["clock_out"] or p["clock_in"], "dir": "out", "file": p["photo_out"]})
+    out.sort(key=lambda x: x["ts"], reverse=True)
+    return jsonify(out[:100])
+
 @app.route("/api/admin/audit")
 def admin_audit():
     require_admin()
@@ -756,12 +773,35 @@ def send_weekly_email(con, wk, test=False):
     if get_setting(con, "wages_placeholder") == "1":
         inner.append('<div style="background:#fdecea;border:1px solid #e2a19a;padding:8px 12px;border-radius:6px;'
                      'font:13px Arial;margin-bottom:12px">Wage rates are placeholders — set real rates in the app (Manager → Team).</div>')
+    inner.append('<h3 style="font:700 16px Arial;margin:4px 0 8px;color:#1a1206">Hours &amp; pay</h3>')
     inner.append(team_table_html(con, rows, tot))
+    # Overtime breakdown — OT hours x OT rate = OT pay, its own section
+    ot_rows = [r for r in rows if r["ot"] > 0]
+    if ot_rows:
+        tot_ot_pay = round(sum(r["ot"] * r["ot_rate"] for r in ot_rows), 2)
+        ot = ['<h3 style="font:700 16px Arial;margin:26px 0 8px;color:#1a1206">Overtime breakdown</h3>',
+              '<table style="border-collapse:collapse;width:100%">',
+              f'<tr><th {TH}>Employee</th><th {THR}>OT hours</th><th {THR}>OT rate</th><th {THR}>OT pay</th></tr>']
+        for r in ot_rows:
+            otpay = round(r["ot"] * r["ot_rate"], 2)
+            ot.append(f'<tr><td {TD}>{r["name"]}</td><td {TDR}>{r["ot"]:.2f}</td>'
+                      f'<td {TDR}>${r["ot_rate"]:.2f}</td><td {TDR}><b>${otpay:.2f}</b></td></tr>')
+        ot.append(f'<tr><td style="padding:10px;font:bold 14px Arial;border-top:2px solid #333">TOTAL OVERTIME</td>'
+                  f'<td></td><td></td><td {TDR}><b>${tot_ot_pay:.2f}</b></td></tr></table>')
+        inner.append("".join(ot))
     text = [f'{get_setting(con,"store_name")} — hours {rng}', "",
+            "HOURS & PAY",
             f'{"Employee":<14}{"Reg":>7}{"OT":>7}{"Total":>8}{"Gross":>11}']
     for r in rows:
         text.append(f'{r["name"][:14]:<14}{r["reg"]:>7.2f}{r["ot"]:>7.2f}{r["hrs"]:>8.2f}{"$"+format(r["pay"],".2f"):>11}')
     text.append(f'{"TOTAL":<14}{tot["reg"]:>7.2f}{tot["ot"]:>7.2f}{tot["hrs"]:>8.2f}{"$"+format(tot["pay"],".2f"):>11}')
+    if ot_rows:
+        text.append("")
+        text.append("OVERTIME BREAKDOWN")
+        text.append(f'{"Employee":<14}{"OT hrs":>8}{"OT rate":>9}{"OT pay":>11}')
+        for r in ot_rows:
+            text.append(f'{r["name"][:14]:<14}{r["ot"]:>8.2f}{"$"+format(r["ot_rate"],".2f"):>9}{"$"+format(round(r["ot"]*r["ot_rate"],2),".2f"):>11}')
+        text.append(f'{"TOTAL OT":<14}{"":>8}{"":>9}{"$"+format(tot_ot_pay,".2f"):>11}')
     subject = f'{"[TEST] " if test else ""}Weekly hours — {rng}'
     return _send(con, get_setting(con, "report_email"), subject, "".join(inner), "\n".join(text), tag=("test " if test else "")+"weekly "+wk)
 
