@@ -287,17 +287,27 @@
     const chk=(labelTxt,on)=>{const l=el("label");l.style.display="flex";l.style.gap="8px";l.style.alignItems="center";l.style.fontSize="13px";l.style.cursor="pointer";l.style.marginBottom="12px";const c=el("input");c.type="checkbox";c.checked=on;c.style.width="auto";l.appendChild(c);l.appendChild(document.createTextNode(labelTxt));l._c=c;return l;};
 
     // email credentials
-    const c2=card("Email setup","The tablet sends reports using your Gmail and a Gmail App Password (not your normal password). Set this once.");
+    const c2=card("Email setup","How the tablet sends your reports. Set this once.");
+    const method=sel([["smtp","Gmail direct"],["brevo","Email service (use if Gmail won't send)"]],s.email_method||"smtp");
     const su=inp("email","your.gmail@gmail.com");su.value=s.smtp_user||"";
     const sp=inp("password",s.smtp_pass_set==="1"?"•••••••• (saved — leave blank to keep)":"16-char app password");
+    const bk=inp("password",s.brevo_key_set==="1"?"•••••••• (saved — leave blank to keep)":"paste your Brevo API key");
     const em=inp("email","owner@email.com");em.value=s.report_email||"";
-    c2.appendChild(field("Gmail address (sender)",su));
-    c2.appendChild(field("Gmail App Password",sp));
+    c2.appendChild(field("Sending method",method));
+    const gmailF=field("Gmail App Password",sp);
+    const brevoF=field("Email-service API key (Brevo)",bk);
+    c2.appendChild(field("Sender email address",su));
+    c2.appendChild(gmailF); c2.appendChild(brevoF);
     c2.appendChild(field("Owner — send my reports to",em));
+    const syncMethod=()=>{const m=method.value;gmailF.style.display=m==="smtp"?"":"none";brevoF.style.display=m==="brevo"?"":"none";};
+    method.onchange=syncMethod; syncMethod();
     c2.appendChild(saveBtn("Save email setup",async()=>{
-      const body={smtp_user:su.value.trim(),report_email:em.value.trim()};
+      const body={smtp_user:su.value.trim(),report_email:em.value.trim(),email_method:method.value};
       if(sp.value.trim())body.smtp_pass=sp.value.trim();
+      if(bk.value.trim())body.brevo_api_key=bk.value.trim();
       await api("/api/admin/settings",{method:"POST",body:JSON.stringify(body)});toast("Saved");}));
+    const en=el("p","muted small mt");en.innerHTML="If Gmail direct won't send (some networks block it), switch to <b>Email service</b> — it sends over normal web traffic that works everywhere. Ask and I'll help you get a free key.";
+    c2.appendChild(en);
     b.appendChild(c2);
 
     // owner — daily digest

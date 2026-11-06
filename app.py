@@ -9,6 +9,7 @@ No internet needed to clock in/out. Internet is used only to send the weekly ema
 """
 
 import os, sys, subprocess, sqlite3, json, time, threading, csv, io, smtplib, ssl, shutil, secrets, hashlib
+import urllib.request, urllib.error
 from datetime import datetime, timedelta, date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -64,8 +65,10 @@ DEFAULT_SETTINGS = {
     "wages_placeholder": "1",
     "smtp_host": "smtp.gmail.com",
     "smtp_port": "587",
-    "smtp_user": "",            # your gmail address
+    "smtp_user": "",            # your gmail address (also the sender for the web-API method)
     "smtp_pass": "",            # gmail APP PASSWORD (not your login password)
+    "email_method": "smtp",     # "smtp" (Gmail direct) or "brevo" (web API, for networks that block SMTP)
+    "brevo_api_key": "",        # Brevo API key when email_method is "brevo"
     "photo_on_punch": "1",      # silently photograph each punch (in and out)
     "photo_keep_days": "60",    # prune punch photos older than this
     # owner weekly summary (whole team) — uses report_day/hour/min above
@@ -511,12 +514,14 @@ def admin_settings():
         s = {r["key"]: r["value"] for r in rows}
         s.pop("smtp_pass", None)  # never send the password back
         s["smtp_pass_set"] = "1" if get_setting(con, "smtp_pass") else "0"
+        s.pop("brevo_api_key", None)  # never send the API key back
+        s["brevo_key_set"] = "1" if get_setting(con, "brevo_api_key") else "0"
         s["lan_ip"] = lan_ip()
         s["port"] = str(PORT)
         return jsonify(s)
     d = request.get_json(force=True, silent=True) or {}
     for k, v in d.items():
-        if k == "smtp_pass" and v == "":   # blank = keep existing
+        if k in ("smtp_pass", "brevo_api_key") and v == "":   # blank = keep existing
             continue
         if k in DEFAULT_SETTINGS:
             set_setting(con, k, v)
@@ -633,13 +638,56 @@ def email_wrap(con, subtitle, inner):
         '</div>'
     )
 
+def _send_brevo(con, to, subject, inner_html, text, tag=""):
+    """Send over HTTPS (port 443) via Brevo's API — works even when SMTP ports are blocked."""
+    key = get_setting(con, "brevo_api_key")
+    sender = get_setting(con, "smtp_user") or get_setting(con, "report_email")
+    store = get_setting(con, "store_name") or "Time Clock"
+    if not key:
+        return False, "No email-service API key set (Manager → Settings → Email)."
+    if not sender:
+        return False, "No sender email set."
+    html = ('<div style="max-width:680px;margin:0 auto;padding:18px;font-family:Arial,Helvetica,sans-serif">'
+            f'<div style="font:700 19px Arial;color:#1a1206">{store}</div>'
+            f'<div style="color:#b06d10;font:600 13px Arial;letter-spacing:.04em;text-transform:uppercase">{subject}</div>'
+            f'<div style="margin-top:16px">{inner_html}</div>'
+            '<div style="color:#999;font:12px Arial;margin-top:18px">Sent automatically by your Groton time clock.</div></div>')
+    payload = json.dumps({
+        "sender": {"email": sender, "name": store},
+        "to": [{"email": to}],
+        "subject": subject,
+        "htmlContent": html,
+        "textContent": text or " ",
+    }).encode()
+    req = urllib.request.Request("https://api.brevo.com/v3/smtp/email", data=payload,
+        headers={"api-key": key, "content-type": "application/json", "accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+        audit(con, "system", "email_sent", f'{tag} -> {to} (api)'); con.commit()
+        return True, f"Sent to {to}"
+    except urllib.error.HTTPError as e:
+        body = ""
+        try: body = e.read().decode()[:180]
+        except Exception: pass
+        audit(con, "system", "email_error", f'api {e.code}: {body}'); con.commit()
+        if e.code in (401, 403):
+            return False, "The email service rejected the API key — double-check it was copied fully."
+        return False, f"Email service error ({e.code}): {body}"
+    except Exception as ex:
+        audit(con, "system", "email_error", f'api: {str(ex)[:120]}'); con.commit()
+        return False, f"Could not reach the email service: {ex}"
+
 def _send(con, to, subject, inner_html, text, tag=""):
+    if not to:
+        return False, "No recipient address."
+    # Web-API method (port 443) — use this when the network blocks SMTP ports.
+    if get_setting(con, "email_method", "smtp") == "brevo":
+        return _send_brevo(con, to, subject, inner_html, text, tag)
     host = get_setting(con, "smtp_host"); port = int(get_setting(con, "smtp_port") or 587)
     user = get_setting(con, "smtp_user"); pw = get_setting(con, "smtp_pass")
     if not (user and pw):
         return False, "No Gmail address / app password set (Manager → Settings → Email)."
-    if not to:
-        return False, "No recipient address."
     root = MIMEMultipart("related")
     root["Subject"] = subject; root["From"] = user; root["To"] = to
     alt = MIMEMultipart("alternative")
