@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Shah's Time Clock</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#14110e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Time Clock">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <img class="logo-img" src="/static/logo.png" alt="Shah's Halal">
+    <div><b id="storeName">Shah's Halal</b><span>Groton · Time Clock</span></div>
+  </div>
+  <div class="clock">
+    <div class="t mono" id="liveTime">--:--</div>
+    <div class="d" id="liveDate">—</div>
+  </div>
+  <a class="iconbtn" href="/admin" title="Manager" aria-label="Manager console">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+  </a>
+</header>
+
+<main class="stage">
+  <section class="card" id="padCard">
+    <div class="loading"><div class="spin"></div><div>Starting the time clock…</div></div>
+  </section>
+  <aside class="card roster">
+    <h3>On the clock <span class="count" id="onCount">0</span></h3>
+    <div class="onlist" id="onList"><div class="emptyroster">No one is clocked in right now.</div></div>
+  </aside>
+</main>
+
+<video id="cam" autoplay playsinline muted class="hidden" width="1" height="1"></video>
+<canvas id="canvas" class="hidden"></canvas>
+<div class="toast" id="toast"></div>
+<script src="/static/kiosk.js"></script>
+</body>
+</html>
