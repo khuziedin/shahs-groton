@@ -413,5 +413,9 @@
   function fromDateTime(dateStr,timeStr){const[y,m,d]=dateStr.split("-").map(Number);const[hh,mm]=timeStr.split(":").map(Number);return Math.floor(new Date(y,m-1,d,hh,mm,0,0).getTime()/1000);}
   function weekStartLocal(wk){const[y,m,d]=wk.split("-").map(Number);return new Date(y,m-1,d,0,0,0,0).getTime();}
 
+  // Back arrow returns to the kiosk AND signs out of the manager console.
+  const _bk=document.getElementById("backKiosk");
+  if(_bk)_bk.addEventListener("click",()=>{try{sessionStorage.removeItem("tc_tok");}catch(e){}});
+
   boot();
 })();
