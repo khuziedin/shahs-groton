@@ -60,6 +60,10 @@ DEFAULT_SETTINGS = {
     "report_hour": "7",
     "report_min": "50",
     "ot_threshold": "40",
+    "round_minutes": "15",      # round each punch to the nearest N minutes (0 = off)
+    "attach_payroll": "1",      # attach the payroll workbook to the weekly owner email
+    "gusto_sync": "0",          # attach a machine-readable hours CSV for the Gusto auto-fill task
+    "gusto_url": "https://app.gusto.com/payrolls",  # link to run payroll in Gusto
     "auto_clockout_hours": "14", # a punch open longer than this gets auto-closed overnight
     "auto_clockout_run_hour": "3",
     "wages_placeholder": "1",
@@ -151,6 +155,7 @@ def init_db():
         if col not in cols:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     ensure_col("employees", "email", "TEXT DEFAULT ''")
+    ensure_col("employees", "pay_type", "TEXT DEFAULT 'check'")  # 'check' (Gusto) or 'cash'
     ensure_col("punches", "photo_out", "TEXT")
     # seed settings
     for k, v in DEFAULT_SETTINGS.items():
@@ -208,13 +213,33 @@ def shift_add_days(week_key_str, days):
     d = date(y, mo, da) + timedelta(days=days)
     return d.strftime("%Y-%m-%d")
 
-def hours_of(p):
+ROUND_MIN = 15  # refreshed from settings at startup and on settings save
+
+def refresh_round(con):
+    global ROUND_MIN
+    try:
+        ROUND_MIN = max(0, int(get_setting(con, "round_minutes", "15") or 15))
+    except Exception:
+        ROUND_MIN = 15
+
+def round_ts(ts):
+    """Round a punch time to the nearest ROUND_MIN minutes (the standard quarter-hour rule)."""
+    if not ROUND_MIN or ts is None:
+        return ts
+    step = ROUND_MIN * 60
+    return int(round(ts / step) * step)
+
+def hours_of(p, rounded=False):
     if p["clock_out"] is None:
         return 0.0
-    return max(0.0, (p["clock_out"] - p["clock_in"]) / 3600.0)
+    a, b = p["clock_in"], p["clock_out"]
+    if rounded:
+        a, b = round_ts(a), round_ts(b)
+    return max(0.0, (b - a) / 3600.0)
 
-def compute_week(con, week_key_str):
-    """Return list of per-employee totals for a week + grand totals."""
+def compute_week(con, week_key_str, rounded=False):
+    """Return list of per-employee totals for a week + grand totals.
+       rounded=True applies punch rounding (used by payroll/email, not the in-app views)."""
     start, end = week_bounds(week_key_str)
     emps = con.execute("SELECT * FROM employees ORDER BY sort_order, name").fetchall()
     # punches that START within the week
@@ -229,7 +254,7 @@ def compute_week(con, week_key_str):
         plist = by_emp.get(e["id"], [])
         if not plist and not e["active"]:
             continue
-        hrs = sum(hours_of(p) for p in plist)
+        hrs = sum(hours_of(p, rounded) for p in plist)
         open_now = any(p["clock_out"] is None for p in plist)
         thr = e["ot_threshold"] or 40
         reg = min(hrs, thr)
@@ -411,6 +436,107 @@ def admin_report_csv():
     return app.response_class(out, mimetype="text/csv",
         headers={"Content-Disposition": f'attachment; filename="hours_{wk}.csv"'})
 
+def payroll_week_data(con, wk):
+    """Per-employee payroll figures for the week, split by check/cash, with daily breakdown."""
+    start, end = week_bounds(wk)
+    emps = con.execute("SELECT * FROM employees WHERE active=1 ORDER BY sort_order,name").fetchall()
+    check, cash = [], []
+    for e in emps:
+        ps = con.execute("SELECT * FROM punches WHERE emp_id=? AND clock_in>=? AND clock_in<? ORDER BY clock_in",
+                         (e["id"], start, end)).fetchall()
+        total = round(sum(hours_of(p) for p in ps), 2)
+        rate = e["rate"] or 0.0
+        otr = e["ot_rate"] if e["ot_rate"] is not None else rate
+        thr = e["ot_threshold"] or 40
+        # daily in/out/hours, Mon..Sun
+        days = []
+        for i in range(7):
+            ds = start + i * 86400; de = ds + 86400
+            dps = [p for p in ps if ds <= p["clock_in"] < de]
+            dh = round(sum(hours_of(p) for p in dps), 2)
+            din = min((p["clock_in"] for p in dps), default=None)
+            douts = [p["clock_out"] for p in dps if p["clock_out"]]
+            dout = max(douts) if douts else None
+            days.append({"in": din, "out": dout, "hrs": dh})
+        rec = {"name": e["name"], "total": total, "rate": rate, "ot_rate": otr,
+               "tip_hrs": round(min(total, 40), 2), "days": days}
+        if (e["pay_type"] or "check") == "cash":
+            rec["cash_pay"] = round(total * rate, 2)
+            cash.append(rec)
+        else:
+            reg = round(min(total, thr), 2); ot = round(max(0, total - thr), 2)
+            rec.update({"reg": reg, "ot": ot, "gross_check": round(reg * rate, 2),
+                        "cash_ot_pay": round(ot * otr, 2)})
+            check.append(rec)
+    return check, cash
+
+PAYROLL_TEMPLATE = os.path.join(BASE, "templates", "payroll_template.xlsx")
+
+def generate_payroll_xlsx(con, wk):
+    """Fill the owner's OWN payroll workbook (formulas intact) with this week's employees
+    and their daily in/out times. All payroll/tip/Gusto math stays their formulas."""
+    import openpyxl
+    start, end = week_bounds(wk)
+    wb = openpyxl.load_workbook(PAYROLL_TEMPLATE)
+    def _sheet(key):
+        for n in wb.sheetnames:
+            if key in n:
+                return wb[n]
+        return None
+    setup = _sheet("Setup"); tt = _sheet("Time Tracker")
+    emps = con.execute("SELECT * FROM employees WHERE active=1 ORDER BY sort_order,name").fetchall()
+    checks = [e for e in emps if (e["pay_type"] or "check") != "cash"][:10]
+    cashes = [e for e in emps if (e["pay_type"] or "check") == "cash"][:10]
+
+    def day_times(eid):
+        ps = con.execute("SELECT * FROM punches WHERE emp_id=? AND clock_in>=? AND clock_in<? ORDER BY clock_in",
+                         (eid, start, end)).fetchall()
+        out = []
+        for i in range(7):
+            ds = start + i * 86400; de = ds + 86400
+            dps = [p for p in ps if ds <= p["clock_in"] < de]
+            worked = sum((round_ts(p["clock_out"]) - round_ts(p["clock_in"])) for p in dps if p["clock_out"])
+            if worked > 0:
+                fin = round_ts(min(p["clock_in"] for p in dps))
+                out.append((local_dt(fin).time(), local_dt(fin + worked).time()))
+            else:
+                out.append((None, None))
+        return out
+
+    TFMT = "h:mm AM/PM"
+    def fill_times(ttrow, times):
+        for d, (ci, co) in enumerate(times):
+            if ci:
+                a = tt.cell(row=ttrow, column=4 + 3 * d, value=ci); a.number_format = TFMT
+                b = tt.cell(row=ttrow, column=5 + 3 * d, value=co); b.number_format = TFMT
+
+    for i, e in enumerate(checks):
+        setup.cell(row=8 + i, column=2, value=e["name"])
+        setup.cell(row=8 + i, column=3, value=round(e["rate"] or 0, 2))
+        setup.cell(row=8 + i, column=4, value=round(e["ot_rate"] if e["ot_rate"] is not None else 0, 2))
+        fill_times(7 + i, day_times(e["id"]))
+    for j, e in enumerate(cashes):
+        setup.cell(row=21 + j, column=2, value=e["name"])
+        setup.cell(row=21 + j, column=3, value=round(e["rate"] or 0, 2))
+        fill_times(19 + j, day_times(e["id"]))
+
+    bio = io.BytesIO(); wb.save(bio); return bio.getvalue()
+
+
+@app.route("/api/admin/payroll.xlsx")
+def admin_payroll_xlsx():
+    require_admin()
+    con = db()
+    wk = request.args.get("week") or this_week_key()
+    try:
+        data = generate_payroll_xlsx(con, wk)
+    except ImportError:
+        return jsonify({"ok": False, "error": "Spreadsheet library not installed. In Termux run: pip install openpyxl"}), 500
+    audit(con, "admin", "payroll_export", wk); con.commit()
+    return app.response_class(data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="payroll_{wk}.xlsx"'})
+
 @app.route("/api/admin/timesheet")
 def admin_timesheet():
     require_admin()
@@ -483,16 +609,17 @@ def admin_employees():
     ot_rate = d.get("ot_rate")
     ot_rate = None if ot_rate in (None, "", "null") else float(ot_rate)
     email = (d.get("email") or "").strip()
+    ptype = "cash" if d.get("pay_type") == "cash" else "check"
     if eid:
-        con.execute("""UPDATE employees SET name=?,pin=?,email=?,rate=?,ot_rate=?,ot_threshold=?,active=? WHERE id=?""",
-                    (d.get("name"), pin, email, float(d.get("rate") or 0), ot_rate,
+        con.execute("""UPDATE employees SET name=?,pin=?,email=?,pay_type=?,rate=?,ot_rate=?,ot_threshold=?,active=? WHERE id=?""",
+                    (d.get("name"), pin, email, ptype, float(d.get("rate") or 0), ot_rate,
                      float(d.get("ot_threshold") or 40), 1 if d.get("active", True) else 0, eid))
         audit(con, "admin", "edit_employee", d.get("name", ""))
     else:
         mx = con.execute("SELECT COALESCE(MAX(sort_order),0) FROM employees").fetchone()[0]
-        con.execute("""INSERT INTO employees(name,pin,email,rate,ot_rate,ot_threshold,active,sort_order,created_at)
-                       VALUES(?,?,?,?,?,?,1,?,?)""",
-                    (d.get("name", "New employee"), pin, email, float(d.get("rate") or 0), ot_rate,
+        con.execute("""INSERT INTO employees(name,pin,email,pay_type,rate,ot_rate,ot_threshold,active,sort_order,created_at)
+                       VALUES(?,?,?,?,?,?,?,1,?,?)""",
+                    (d.get("name", "New employee"), pin, email, ptype, float(d.get("rate") or 0), ot_rate,
                      float(d.get("ot_threshold") or 40), mx + 1, int(time.time())))
         audit(con, "admin", "add_employee", d.get("name", ""))
     con.commit()
@@ -544,6 +671,7 @@ def admin_settings():
             set_setting(con, k, v)
     audit(con, "admin", "settings", ",".join(d.keys()))
     con.commit()
+    refresh_round(con)
     return jsonify({"ok": True})
 
 @app.route("/api/admin/send_test", methods=["POST"])
@@ -655,8 +783,9 @@ def email_wrap(con, subtitle, inner):
         '</div>'
     )
 
-def _send_brevo(con, to, subject, inner_html, text, tag=""):
+def _send_brevo(con, to, subject, inner_html, text, tag="", attachments=None):
     """Send over HTTPS (port 443) via Brevo's API — works even when SMTP ports are blocked."""
+    import base64 as _b64
     key = get_setting(con, "brevo_api_key")
     sender = get_setting(con, "smtp_user") or get_setting(con, "report_email")
     store = get_setting(con, "store_name") or "Time Clock"
@@ -669,13 +798,16 @@ def _send_brevo(con, to, subject, inner_html, text, tag=""):
             f'<div style="color:#b06d10;font:600 13px Arial;letter-spacing:.04em;text-transform:uppercase">{subject}</div>'
             f'<div style="margin-top:16px">{inner_html}</div>'
             '<div style="color:#999;font:12px Arial;margin-top:18px">Sent automatically by your Groton time clock.</div></div>')
-    payload = json.dumps({
+    body = {
         "sender": {"email": sender, "name": store},
         "to": [{"email": to}],
         "subject": subject,
         "htmlContent": html,
         "textContent": text or " ",
-    }).encode()
+    }
+    if attachments:
+        body["attachment"] = [{"name": fn, "content": _b64.b64encode(data).decode()} for fn, data in attachments]
+    payload = json.dumps(body).encode()
     req = urllib.request.Request("https://api.brevo.com/v3/smtp/email", data=payload,
         headers={"api-key": key, "content-type": "application/json", "accept": "application/json"})
     try:
@@ -695,27 +827,33 @@ def _send_brevo(con, to, subject, inner_html, text, tag=""):
         audit(con, "system", "email_error", f'api: {str(ex)[:120]}'); con.commit()
         return False, f"Could not reach the email service: {ex}"
 
-def _send(con, to, subject, inner_html, text, tag=""):
+def _send(con, to, subject, inner_html, text, tag="", attachments=None):
     if not to:
         return False, "No recipient address."
     # Web-API method (port 443) — use this when the network blocks SMTP ports.
     if get_setting(con, "email_method", "smtp") == "brevo":
-        return _send_brevo(con, to, subject, inner_html, text, tag)
+        return _send_brevo(con, to, subject, inner_html, text, tag, attachments=attachments)
     host = get_setting(con, "smtp_host"); port = int(get_setting(con, "smtp_port") or 587)
     user = get_setting(con, "smtp_user"); pw = get_setting(con, "smtp_pass")
     if not (user and pw):
         return False, "No Gmail address / app password set (Manager → Settings → Email)."
-    root = MIMEMultipart("related")
+    root = MIMEMultipart("mixed")
     root["Subject"] = subject; root["From"] = user; root["To"] = to
+    related = MIMEMultipart("related")
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(text, "plain")); alt.attach(MIMEText(email_wrap(con, subject, inner_html), "html"))
-    root.attach(alt)
+    related.attach(alt)
     try:
         with open(LOGO_EMAIL, "rb") as f:
             img = MIMEImage(f.read()); img.add_header("Content-ID", "<logo>")
-            img.add_header("Content-Disposition", "inline", filename="logo.png"); root.attach(img)
+            img.add_header("Content-Disposition", "inline", filename="logo.png"); related.attach(img)
     except Exception:
         pass
+    root.attach(related)
+    for fn, data in (attachments or []):
+        from email.mime.application import MIMEApplication
+        ap = MIMEApplication(data, _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        ap.add_header("Content-Disposition", "attachment", filename=fn); root.attach(ap)
     raw = root.as_string()
     # Try the configured port, then fall back to the other Gmail port/method.
     # 587 = STARTTLS, 465 = implicit SSL. Some networks block one but allow the other.
@@ -763,7 +901,7 @@ def team_table_html(con, rows, tot):
     return "".join(t)
 
 def send_weekly_email(con, wk, test=False):
-    rows, tot = compute_week(con, wk)
+    rows, tot = compute_week(con, wk, rounded=True)
     rng = week_range_label(wk)
     inner = []
     still = [r["name"] for r in rows if r["open_now"]]
@@ -803,10 +941,37 @@ def send_weekly_email(con, wk, test=False):
             text.append(f'{r["name"][:14]:<14}{r["ot"]:>8.2f}{"$"+format(r["ot_rate"],".2f"):>9}{"$"+format(round(r["ot"]*r["ot_rate"],2),".2f"):>11}')
         text.append(f'{"TOTAL OT":<14}{"":>8}{"":>9}{"$"+format(tot_ot_pay,".2f"):>11}')
     subject = f'{"[TEST] " if test else ""}Weekly hours — {rng}'
-    return _send(con, get_setting(con, "report_email"), subject, "".join(inner), "\n".join(text), tag=("test " if test else "")+"weekly "+wk)
+    attachments = []
+    # Machine-readable hours feed for the Gusto auto-fill task (check employees only).
+    if get_setting(con, "gusto_sync", "0") == "1":
+        try:
+            ptypes = {e["id"]: (e["pay_type"] or "check") for e in con.execute("SELECT id,pay_type FROM employees").fetchall()}
+            sbuf = io.StringIO(); w = csv.writer(sbuf)
+            w.writerow(["week", "employee", "pay_type", "total_hours", "regular_hours_le40", "ot_hours_gt40"])
+            for r in rows:
+                w.writerow([wk, r["name"], ptypes.get(r["id"], "check"), f'{r["hrs"]:.2f}', f'{r["reg"]:.2f}', f'{r["ot"]:.2f}'])
+            attachments.append((f"gusto_hours_{wk}.csv", sbuf.getvalue().encode()))
+        except Exception as ex:
+            audit(con, "system", "gusto_csv_error", str(ex)[:140]); con.commit()
+    # Attach the payroll workbook (your template, filled) so you can run payroll from anywhere.
+    if get_setting(con, "attach_payroll", "1") == "1":
+        try:
+            attachments.append((f"payroll_{wk}.xlsx", generate_payroll_xlsx(con, wk)))
+            gusto_url = get_setting(con, "gusto_url", "https://app.gusto.com/payrolls")
+            gusto_link = (f'<div style="margin-top:6px"><a href="{gusto_url}" '
+                          'style="color:#0a7d3c;font-weight:bold;text-decoration:none">▶ Run payroll in Gusto →</a></div>'
+                          ) if gusto_url else ""
+            inner.insert(0, '<div style="background:#eef7f0;border:1px solid #b7dcc3;padding:8px 12px;border-radius:6px;'
+                            'font:13px Arial;margin-bottom:12px">📎 Your payroll workbook for this week is attached — '
+                            'open it, enter the tip pools on the Tips tab, and use the Gusto Inputs tab to run payroll.'
+                            + gusto_link + '</div>')
+        except Exception as ex:
+            audit(con, "system", "payroll_attach_error", str(ex)[:140]); con.commit()
+    return _send(con, get_setting(con, "report_email"), subject, "".join(inner), "\n".join(text),
+                 tag=("test " if test else "")+"weekly "+wk, attachments=(attachments or None))
 
 # ---- daily digest (owner) ----
-def compute_day(con, d):
+def compute_day(con, d, rounded=False):
     """Per-employee hours for one local calendar date d (a date)."""
     start = int(datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=TZ()).timestamp())
     end = start + 86400
@@ -817,7 +982,7 @@ def compute_day(con, d):
     rows = []; total = 0.0
     for eid, plist in by.items():
         e = con.execute("SELECT name FROM employees WHERE id=?", (eid,)).fetchone()
-        hrs = sum(hours_of(p) for p in plist)
+        hrs = sum(hours_of(p, rounded) for p in plist)
         open_now = any(p["clock_out"] is None for p in plist)
         rows.append({"name": e["name"] if e else "?", "hrs": round(hrs, 2),
                      "shifts": len(plist), "open_now": open_now,
@@ -828,7 +993,7 @@ def compute_day(con, d):
     return rows, round(total, 2)
 
 def send_daily_email(con, day, test=False):
-    rows, total = compute_day(con, day)
+    rows, total = compute_day(con, day, rounded=True)
     label = day.strftime("%A, %b %-d")
     if rows:
         t = ['<table style="border-collapse:collapse;width:100%">',
@@ -851,7 +1016,7 @@ def send_daily_email(con, day, test=False):
 
 # ---- per-employee weekly (sent to each employee) ----
 def send_employee_weekly(con, wk, test=False, only_to=None):
-    rows, _ = compute_week(con, wk)
+    rows, _ = compute_week(con, wk, rounded=True)
     rng = week_range_label(wk)
     by_id = {r["id"]: r for r in rows}
     emps = con.execute("SELECT * FROM employees WHERE active=1 AND email<>'' ORDER BY sort_order,name").fetchall()
@@ -990,8 +1155,20 @@ def start_scheduler():
     t.start()
 
 # ----------------------------------------------------------------------------
+def ensure_deps():
+    """Install openpyxl (for payroll Excel export) on first run if it's missing."""
+    try:
+        import openpyxl  # noqa
+    except ImportError:
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "openpyxl"], timeout=180)
+        except Exception:
+            pass
+
 if __name__ == "__main__":
     init_db()
+    ensure_deps()
+    _c0 = sqlite3.connect(DB); _c0.row_factory = sqlite3.Row; refresh_round(_c0); _c0.close()
     start_scheduler()
     ip = lan_ip()
     print("=" * 52)

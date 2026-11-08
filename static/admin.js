@@ -112,10 +112,18 @@
     loadingInto(b);
     const d=await api("/api/admin/report"+(S.week?"?week="+S.week:""));
     S.week=d.week; b.innerHTML="";
+    const dlwrap=el("div");dlwrap.style.display="flex";dlwrap.style.gap="8px";dlwrap.style.flexWrap="wrap";
     const dl=el("button","btn sm","Download CSV");
     dl.onclick=()=>{ fetch("/api/admin/report.csv?week="+S.week,{headers:{"Authorization":"Bearer "+token()}})
       .then(r=>r.blob()).then(bl=>{const u=URL.createObjectURL(bl);const a=document.createElement("a");a.href=u;a.download="hours_"+S.week+".csv";a.click();URL.revokeObjectURL(u);}); };
-    b.appendChild(weekBar(nav,dl)); setWkLabel(d.range,d.this_week,d.week);
+    const plbtn=el("button","btn sm primary","Download payroll sheet");
+    plbtn.onclick=()=>{plbtn.disabled=true;plbtn.textContent="Building…";
+      fetch("/api/admin/payroll.xlsx?week="+S.week,{headers:{"Authorization":"Bearer "+token()}})
+      .then(async r=>{if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||"Failed");}return r.blob();})
+      .then(bl=>{const u=URL.createObjectURL(bl);const a=document.createElement("a");a.href=u;a.download="payroll_"+S.week+".xlsx";a.click();URL.revokeObjectURL(u);plbtn.disabled=false;plbtn.textContent="Download payroll sheet";})
+      .catch(e=>{plbtn.disabled=false;plbtn.textContent="Download payroll sheet";toast(e.message||"Failed");}); };
+    dlwrap.appendChild(dl);dlwrap.appendChild(plbtn);
+    b.appendChild(weekBar(nav,dlwrap)); setWkLabel(d.range,d.this_week,d.week);
     if(d.wages_placeholder)b.appendChild(banner("Pay below uses <b>placeholder</b> rates — set real wages in Team."));
     const wrap=el("div","tablewrap");const tbl=el("table");
     tbl.innerHTML='<thead><tr><th>Employee</th><th class="num">Reg</th><th class="num">OT</th><th class="num">Total</th><th class="num">Rate</th><th class="num">OT rate</th><th class="num">Gross pay</th></tr></thead>';
@@ -210,16 +218,18 @@
     const ot=el("input");ot.type="number";ot.step="0.01";ot.value=e.ot_rate!=null?e.ot_rate:"";ot.placeholder="base";
     const thr=el("input");thr.type="number";thr.value=e.ot_threshold!=null?e.ot_threshold:40;
     const email=el("input");email.type="email";email.value=e.email||"";email.placeholder="employee@email.com (for their weekly report)";
+    const ptype=sel([["check","Check (Gusto)"],["cash","Cash"]],e.pay_type||"check");
     row.appendChild(f("Name",name));row.appendChild(f("PIN",pin));row.appendChild(f("Rate $/hr",rate));row.appendChild(f("OT rate",ot));row.appendChild(f("OT after",thr));
+    const ptF=f("Pay type",ptype);row.appendChild(ptF);
     const emF=f("Email (their weekly report)",email);emF.style.gridColumn="1/-1";row.appendChild(emF);
     const actions=el("div","f");actions.innerHTML='<label>&nbsp;</label>';
     const box=el("div");box.style.display="flex";box.style.gap="6px";
     const save=el("button","btn sm primary","Save");
     save.onclick=async()=>{save.disabled=true;
-      const r=await api("/api/admin/employees",{method:"POST",body:JSON.stringify({id:e.id,name:name.value.trim()||e.name,pin:pin.value.trim(),email:email.value.trim(),rate:rate.value,ot_rate:ot.value===""?null:ot.value,ot_threshold:thr.value,active:e.active})});
+      const r=await api("/api/admin/employees",{method:"POST",body:JSON.stringify({id:e.id,name:name.value.trim()||e.name,pin:pin.value.trim(),email:email.value.trim(),pay_type:ptype.value,rate:rate.value,ot_rate:ot.value===""?null:ot.value,ot_threshold:thr.value,active:e.active})});
       if(r.ok){toast("Saved");}else{save.disabled=false;toast(r.error||"Error");}};
     const act=el("button","btn sm",e.active?"Deactivate":"Reactivate");
-    act.onclick=async()=>{await api("/api/admin/employees",{method:"POST",body:JSON.stringify({id:e.id,name:name.value,pin:pin.value,email:email.value.trim(),rate:rate.value,ot_rate:ot.value===""?null:ot.value,ot_threshold:thr.value,active:e.active?false:true})});show();};
+    act.onclick=async()=>{await api("/api/admin/employees",{method:"POST",body:JSON.stringify({id:e.id,name:name.value,pin:pin.value,email:email.value.trim(),pay_type:ptype.value,rate:rate.value,ot_rate:ot.value===""?null:ot.value,ot_threshold:thr.value,active:e.active?false:true})});show();};
     box.appendChild(save);box.appendChild(act);actions.appendChild(box);row.appendChild(actions);
     return row;
   }
@@ -367,6 +377,19 @@
     ce.appendChild(ceRow);
     const eNote=el("p","muted small mt");eNote.innerHTML="Set each person's email in <b>Team</b>. The test sends one sample stub to your owner address.";
     ce.appendChild(eNote);b.appendChild(ce);
+
+    // payroll & rounding
+    const cpr=card("Payroll & rounding","Your payroll workbook attaches to the Monday email. Rounding applies ONLY to the emailed reports and payroll — the app always shows actual clock times.");
+    const rnd=sel([["0","No rounding"],["5","Nearest 5 min"],["10","Nearest 10 min"],["15","Nearest 15 min"],["30","Nearest 30 min"]],s.round_minutes||"15");
+    cpr.appendChild(field("Round punches to",rnd));
+    const attach=chk("Attach the payroll workbook to the Monday email",s.attach_payroll!=="0");
+    cpr.appendChild(attach);
+    const gsync=chk("Gusto auto-fill: attach machine-readable hours so payroll pre-fills in Gusto",s.gusto_sync==="1");
+    cpr.appendChild(gsync);
+    const gurl=inp("url","https://app.gusto.com/payrolls");gurl.value=s.gusto_url||"https://app.gusto.com/payrolls";
+    cpr.appendChild(field("Gusto payroll link (shown in the Monday email)",gurl));
+    cpr.appendChild(saveBtn("Save",async()=>{await api("/api/admin/settings",{method:"POST",body:JSON.stringify({round_minutes:rnd.value,attach_payroll:attach._c.checked?"1":"0",gusto_sync:gsync._c.checked?"1":"0",gusto_url:gurl.value.trim()})});toast("Saved");}));
+    b.appendChild(cpr);
 
     // operations
     const c3=card("Automation","Hands-off housekeeping that runs on the tablet.");
