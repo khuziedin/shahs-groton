@@ -9,7 +9,11 @@ No internet needed to clock in/out. Internet is used only to send the weekly ema
 """
 
 import os, sys, subprocess, sqlite3, json, time, threading, csv, io, smtplib, ssl, shutil, secrets, hashlib
-import urllib.request, urllib.error
+import urllib.request, urllib.error, urllib.parse
+try:
+    import creds as _creds          # data/credentials.json loader (gmail + portal logins)
+except Exception:
+    _creds = None
 from datetime import datetime, timedelta, date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -71,7 +75,7 @@ DEFAULT_SETTINGS = {
     "smtp_port": "587",
     "smtp_user": "",            # your gmail address (also the sender for the web-API method)
     "smtp_pass": "",            # gmail APP PASSWORD (not your login password)
-    "email_method": "smtp",     # "smtp" (Gmail direct) or "brevo" (web API, for networks that block SMTP)
+    "email_method": "smtp",     # "smtp" (Gmail direct), "gmail_api" (your Google account over 443), or "brevo"
     "brevo_api_key": "",        # Brevo API key when email_method is "brevo"
     "photo_on_punch": "1",      # silently photograph each punch (in and out)
     "photo_keep_days": "60",    # prune punch photos older than this
@@ -827,12 +831,85 @@ def _send_brevo(con, to, subject, inner_html, text, tag="", attachments=None):
         audit(con, "system", "email_error", f'api: {str(ex)[:120]}'); con.commit()
         return False, f"Could not reach the email service: {ex}"
 
+def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None):
+    """Send as your own Gmail via the Gmail API over HTTPS (port 443) — no Brevo, no SMTP ports.
+    Credentials live in data/credentials.json ('gmail' block); set up once with get_gmail_token.py."""
+    import base64 as _b64
+    g = (_creds.get("gmail") if _creds else {}) or {}
+    cid = g.get("client_id", ""); csec = g.get("client_secret", ""); rtok = g.get("refresh_token", "")
+    sender = g.get("sender") or get_setting(con, "smtp_user") or get_setting(con, "report_email")
+    if not (cid and csec and rtok) or str(cid).startswith("REPLACE_"):
+        return False, "Gmail API isn't set up yet (data/credentials.json → gmail). See CREDENTIALS_SETUP.md."
+    if not sender:
+        return False, "No sender email set."
+    # 1) exchange the refresh token for a short-lived access token
+    try:
+        tok_data = urllib.parse.urlencode({
+            "client_id": cid, "client_secret": csec,
+            "refresh_token": rtok, "grant_type": "refresh_token"}).encode()
+        treq = urllib.request.Request("https://oauth2.googleapis.com/token", data=tok_data,
+            headers={"content-type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(treq, timeout=30) as r:
+            access = json.loads(r.read().decode()).get("access_token")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try: detail = e.read().decode()[:160]
+        except Exception: pass
+        audit(con, "system", "email_error", f'gmail token {e.code}: {detail}'); con.commit()
+        return False, "Google rejected the sign-in — the token may have expired (publish the OAuth app) or been revoked."
+    except Exception as ex:
+        audit(con, "system", "email_error", f'gmail token: {str(ex)[:120]}'); con.commit()
+        return False, f"Could not reach Google: {ex}"
+    if not access:
+        return False, "Google did not return an access token."
+    # 2) build the same rich MIME as the SMTP path (inline logo + any attachments)
+    root = MIMEMultipart("mixed")
+    root["Subject"] = subject; root["From"] = sender; root["To"] = to
+    related = MIMEMultipart("related")
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text, "plain")); alt.attach(MIMEText(email_wrap(con, subject, inner_html), "html"))
+    related.attach(alt)
+    try:
+        with open(LOGO_EMAIL, "rb") as f:
+            img = MIMEImage(f.read()); img.add_header("Content-ID", "<logo>")
+            img.add_header("Content-Disposition", "inline", filename="logo.png"); related.attach(img)
+    except Exception:
+        pass
+    root.attach(related)
+    for fn, data in (attachments or []):
+        from email.mime.application import MIMEApplication
+        ap = MIMEApplication(data, _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        ap.add_header("Content-Disposition", "attachment", filename=fn); root.attach(ap)
+    raw = _b64.urlsafe_b64encode(root.as_bytes()).decode()
+    # 3) send through the Gmail API
+    try:
+        sreq = urllib.request.Request(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            data=json.dumps({"raw": raw}).encode(),
+            headers={"Authorization": "Bearer " + access, "content-type": "application/json"})
+        with urllib.request.urlopen(sreq, timeout=45) as r:
+            r.read()
+        audit(con, "system", "email_sent", f'{tag} -> {to} (gmail api)'); con.commit()
+        return True, f"Sent to {to}"
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try: detail = e.read().decode()[:160]
+        except Exception: pass
+        audit(con, "system", "email_error", f'gmail send {e.code}: {detail}'); con.commit()
+        return False, f"Gmail API error ({e.code}): {detail}"
+    except Exception as ex:
+        audit(con, "system", "email_error", f'gmail send: {str(ex)[:120]}'); con.commit()
+        return False, f"Could not reach the Gmail API: {ex}"
+
 def _send(con, to, subject, inner_html, text, tag="", attachments=None):
     if not to:
         return False, "No recipient address."
-    # Web-API method (port 443) — use this when the network blocks SMTP ports.
-    if get_setting(con, "email_method", "smtp") == "brevo":
+    # Web-API methods (port 443) — use these when the network blocks SMTP ports.
+    method = get_setting(con, "email_method", "smtp")
+    if method == "brevo":
         return _send_brevo(con, to, subject, inner_html, text, tag, attachments=attachments)
+    if method == "gmail_api":
+        return _send_gmail_api(con, to, subject, inner_html, text, tag, attachments=attachments)
     host = get_setting(con, "smtp_host"); port = int(get_setting(con, "smtp_port") or 587)
     user = get_setting(con, "smtp_user"); pw = get_setting(con, "smtp_pass")
     if not (user and pw):

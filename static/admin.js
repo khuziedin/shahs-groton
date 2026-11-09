@@ -320,7 +320,7 @@
 
     // email credentials
     const c2=card("Email setup","How the tablet sends your reports. Set this once.");
-    const method=sel([["smtp","Gmail direct"],["brevo","Email service (use if Gmail won't send)"]],s.email_method||"smtp");
+    const method=sel([["smtp","Gmail direct (app password)"],["gmail_api","Gmail API (your account, port 443)"],["brevo","Email service (Brevo)"]],s.email_method||"smtp");
     const su=inp("email","your.gmail@gmail.com");su.value=s.smtp_user||"";
     const sp=inp("password",s.smtp_pass_set==="1"?"•••••••• (saved — leave blank to keep)":"16-char app password");
     const bk=inp("password",s.brevo_key_set==="1"?"•••••••• (saved — leave blank to keep)":"paste your Brevo API key");
@@ -329,9 +329,10 @@
     const gmailF=field("Gmail App Password",sp);
     const brevoF=field("Email-service API key (Brevo)",bk);
     c2.appendChild(field("Sender email address",su));
-    c2.appendChild(gmailF); c2.appendChild(brevoF);
+    const apiNote=el("p","muted small");apiNote.innerHTML="Sends through your own Google account over port 443 — no Brevo, no app password. Credentials live in <b>data/credentials.json</b> on the tablet (set up once with get_gmail_token.py — see CREDENTIALS_SETUP.md).";
+    c2.appendChild(gmailF); c2.appendChild(brevoF); c2.appendChild(apiNote);
     c2.appendChild(field("Owner — send my reports to",em));
-    const syncMethod=()=>{const m=method.value;gmailF.style.display=m==="smtp"?"":"none";brevoF.style.display=m==="brevo"?"":"none";};
+    const syncMethod=()=>{const m=method.value;gmailF.style.display=m==="smtp"?"":"none";brevoF.style.display=m==="brevo"?"":"none";apiNote.style.display=m==="gmail_api"?"":"none";};
     method.onchange=syncMethod; syncMethod();
     c2.appendChild(saveBtn("Save email setup",async()=>{
       const body={smtp_user:su.value.trim(),report_email:em.value.trim(),email_method:method.value};
