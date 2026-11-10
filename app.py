@@ -87,6 +87,10 @@ DEFAULT_SETTINGS = {
     # per-employee weekly report on payroll day (Wednesday, for the week that ended Sunday)
     "employee_reports": "1", "payroll_day": "2", "payroll_hour": "8", "payroll_min": "5",
     "last_payroll_week": "",
+    # inventory / ordering
+    "inv_password": "1234",      # staff enter this to open the Inventory counter (change in Settings)
+    "inv_deadline": "Sunday",    # order deadline shown on the count screen
+    "inv_order_to": "",          # where finished orders email to (blank = owner report_email)
 }
 
 # Generic samples, only used to seed a brand-new install so it isn't empty.
@@ -152,6 +156,34 @@ def init_db():
         action TEXT NOT NULL,
         detail TEXT DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS inv_items(
+        code TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        cat TEXT DEFAULT '',
+        unit TEXT DEFAULT '',
+        vendor TEXT DEFAULT 'other',
+        ims TEXT DEFAULT '',
+        rd TEXT DEFAULT '',
+        price REAL,
+        par REAL NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS inv_counts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        counted_by TEXT DEFAULT '',
+        comment TEXT DEFAULT '',
+        totals TEXT DEFAULT '',
+        est REAL DEFAULT 0,
+        order_text TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS inv_count_lines(
+        count_id INTEGER NOT NULL REFERENCES inv_counts(id) ON DELETE CASCADE,
+        code TEXT,
+        on_hand REAL,
+        order_qty REAL
+    );
     """)
     # migrations for databases created by an earlier version
     def ensure_col(table, col, decl):
@@ -173,6 +205,16 @@ def init_db():
                            VALUES(?,?,?,?,?,1,?,?)""", (name, pin, rate, otr, thr, order, now))
         con.execute("INSERT INTO audit(ts,actor,action,detail) VALUES(?,?,?,?)",
                     (now, "system", "seed", f"Seeded {len(SEED_EMPLOYEES)} employees"))
+    # seed inventory catalog once (pars/vendors become editable in Manager -> Inventory)
+    ni = con.execute("SELECT COUNT(*) FROM inv_items").fetchone()[0]
+    if ni == 0:
+        for i, it in enumerate(INV_CATALOG):
+            code, name, cat, unit, vendor, ims, rd, price, par = it
+            con.execute("""INSERT OR IGNORE INTO inv_items(code,name,cat,unit,vendor,ims,rd,price,par,active,sort_order)
+                           VALUES(?,?,?,?,?,?,?,?,?,1,?)""",
+                        (code, name, cat, unit, vendor, ims or "", rd or "", price, par, i))
+        con.execute("INSERT INTO audit(ts,actor,action,detail) VALUES(?,?,?,?)",
+                    (int(time.time()), "system", "seed", f"Seeded {len(INV_CATALOG)} inventory items"))
     con.commit()
     con.close()
 
@@ -756,6 +798,357 @@ def admin_update():
         return jsonify({"ok": True, "updated": True, "commit": new, "msg": "Updated — restarting now."})
     except Exception as ex:
         return jsonify({"ok": False, "error": f"Update failed: {ex}"})
+
+# ----------------------------------------------------------------------------
+# INVENTORY / ORDERING
+# ----------------------------------------------------------------------------
+import math
+
+INV_CATS = ["Frozen", "Cooler", "Produce", "Dry", "Paper", "Drinks", "Cleaning", "Specialty"]
+INV_VNAME = {"shahs": "Shah's (IMS)", "rd": "Restaurant Depot", "pfg": "PFG", "other": "Other"}
+
+# exact order of codes on ims.shahshalalfood.com/requisitions/add
+INV_IMS_ORDER = ["S4","B5","Philly4","PhillyC","HW","SN","SSN","SSBCF","KK","SBCF","ShahsFF","SPPF","SHR","SHB","SH6","SHUM","Fish","Chu M","WSP","SHS","SGS","SFAL","SC","SO","L","TO","CU","RO","GP","SB5","SAT","WS","SSWS","PANINI","BBQ","ShahsR","RM","MAYOH4","ChickP","BB","Fry","Oil","K","PCK","PCBC","T","MG4","PK","WATER","SGO","SHAHSP","SHAHSL","F","N","MF","LF","1","1LID","GB46","WP","SWP","LWP","CW","BBB","CBB","FFC","SHFL","SNB","AHALF","ALID","SHAHSPB","SP","KN","Straw","FS","TRP","SLB","STGB","NMB","NSB","SFS","SBLG","BMG","SBXLG","SBC","GS","969","Bleach","SLC","MOPS","SWMC","FLP","WPP","ST","PICKLES","TP","SLG","SBBB","SFALP","TS","LJ","SALTG","CA","CS","SPW","GPS","SRCS","CHBBQ","KBWS","LPS","SFB","SPOP","SFSB","PM"]
+INV_RANK = {c: i for i, c in enumerate(INV_IMS_ORDER)}
+
+# (code, name, category, unit, vendor, ims-code, rd-item#, price, starter-par)
+INV_CATALOG = [
+ ("S4","Halal Gyro 4/10","Frozen","4/10 lb cones","shahs","S4","",118,2),
+ ("B5","Beef Burgers","Frozen","10 lb box","shahs","B5","",45,5),
+ ("Philly4","Halal Beef Steak","Frozen","10 lb box","shahs","Philly4","",52,4),
+ ("PhillyC","Halal Chicken Steak","Frozen","10 lb box","shahs","PhillyC","",40,2),
+ ("HW","Spicy Chicken Wings","Frozen","20 lb box","shahs","HW","",83,2),
+ ("SN","Chicken Nuggets","Frozen","10 lb box","shahs","SN","",30,1),
+ ("SSN","Spicy Nuggets","Frozen","10 lb box","shahs","SSN","",30,1),
+ ("SSBCF","Spicy Breaded Chicken Fillet","Frozen","10 lb box","shahs","SSBCF","",49,2),
+ ("KK","Kofta Kebab","Frozen","80 pc box","shahs","KK","",100,1),
+ ("SBCF","Breaded Chicken Fillet","Frozen","10 lb box","shahs","SBCF","",47,2),
+ ("ShahsFF","French Fries","Frozen","6/5 lb case","shahs","ShahsFF","",55,4),
+ ("SPPF","Potato Pakora Fries","Frozen","24 lb case","shahs","SPPF","",49,5),
+ ("SHR","Hero Roll 10in","Frozen","48 pc box","shahs","SHR","",35,3),
+ ("SHB","Burger Brioche Buns","Frozen","72 pc box","shahs","SHB","",35,4),
+ ("SH6","Hummus 6oz","Frozen","18 pk","shahs","SH6","",50,1),
+ ("SHUM","Hummus Tub","Frozen","4/5 lb tubs","shahs","SHUM","",65,2),
+ ("Fish","Fish 8-10oz","Frozen","22 lb box","rd","Fish","9165000221",None,2),
+ ("ChuM","Marinated Chicken","Cooler","4/5 lb bags","shahs","Chu M","",104,10),
+ ("WSP","White Sauce Packets 2oz","Cooler","120 ct","shahs","WSP","",42,1),
+ ("SHS","Hot Sauce","Cooler","4/1 gal","shahs","SHS","",68,1),
+ ("SGS","Green Sauce","Cooler","4/1 gal","shahs","SGS","",76,1),
+ ("SFAL","Falafel Mix","Cooler","6/5 lb","shahs","SFAL","",65,1),
+ ("WC","White American Cheese","Cooler","160 ct","rd","","76069501063",43.69,2),
+ ("SB5","Baklava 5oz","Cooler","36 ct","shahs","SB5","",96,1),
+ ("SAT","Assorted Treats","Cooler","36 pc","shahs","SAT","",108,1),
+ ("SO","Spanish Onion","Produce","50 lb","rd","SO","2060042545",32.86,2),
+ ("L","Lettuce","Produce","24 ct case","rd","L","2060042638",61.86,2),
+ ("TO","Tomato 5x6","Produce","25 lb box","rd","TO","",27.2,2),
+ ("CU","Cucumber","Produce","50 lb","rd","CU","2060042503",20.99,2),
+ ("RO","Red Onion","Produce","25 lb","rd","RO","2060042658",23.45,2),
+ ("CIL","Cilantro","Produce","24 ct","rd","","2060651730",None,1),
+ ("GP","Green Pepper","Produce","25 lb","rd","GP","2060042704",24,1),
+ ("WS","White Sauce","Dry","4/1 gal","shahs","WS","",50,5),
+ ("SSWS","Standcap White Sauce","Dry","12 pk","shahs","SSWS","",49,2),
+ ("PANINI","Panini 8in","Dry","10 pk box","shahs","PANINI","",36,1),
+ ("BBQ","BBQ Sauce","Dry","4/1 gal","rd","BBQ","73214673618",40,1),
+ ("ShahsR","Shah's Rice","Dry","40 lb bag","shahs","ShahsR","",45,5),
+ ("RM","Rice Masala","Dry","24 pk","shahs","RM","",48,1),
+ ("MAYOH4","Hellman's Mayo","Dry","4/1 gal","rd","MAYOH4","76069500326",39,1),
+ ("ChickP","Chickpeas","Dry","6/10 lb cans","rd","ChickP","76069501473",26,2),
+ ("BB","Black Beans","Dry","6/10 lb cans","rd","BB","76069501475",23,2),
+ ("Fry","Frying Oil","Dry","35 lb","rd","Fry","76069500938",39,4),
+ ("Oil","Soybean Oil (rice)","Dry","35 lb","rd","Oil","",None,1),
+ ("K","Ketchup Jar","Dry","6 ct","rd","K","76069501848",32,1),
+ ("PCK","PC Ketchup","Dry","1000 ct","rd","PCK","76069500288",21,1),
+ ("PCBC","PC Blue Cheese","Dry","60 ct","rd","PCBC","76069500989",16,1),
+ ("T","Fish Breading","Dry","40 lb","rd","T","71832834001",55,1),
+ ("MG4","Master Gravy","Dry","4/1 gal","rd","MG4","2816001371",106,1),
+ ("PK","B&G Pickle Chips","Dry","4/1 gal","rd","PK","3150000942",23,1),
+ ("WATER","Water 16oz","Dry","40 pk","rd","WATER","7572090450",8,4),
+ ("SGO","Sliced Green Olives","Dry","6/10 lb cans","rd","SGO","76069500799",46,1),
+ ("SHAHSP","Plates (bowls)","Paper","400 ct","shahs","SHAHSP","",35,3),
+ ("SHAHSL","Lids","Paper","500 ct","shahs","SHAHSL","",35,2),
+ ("F","Heavy Duty Forks","Paper","1000 ct","rd","F","76069503025",20,2),
+ ("N","Napkins","Paper","8000 ct","rd","N","76069501916",27,1),
+ ("MF","Medium Foil Roll","Paper","12/1000","rd","MF","",None,1),
+ ("LF","Large Foil Roll","Paper","18/500","rd","LF","",None,1),
+ ("1","1oz Cups","Paper","2500 ct","rd","1","4159439382",27,1),
+ ("1LID","1oz Lids","Paper","2500 ct","rd","1LID","4159408259",18,1),
+ ("GB46","Black Garbage Bags 40gal","Paper","case","rd","GB46","2320097",53,1),
+ ("WP","Junior Wax Paper","Paper","3000 ct","rd","WP","23024",45,1),
+ ("SWP","Shah's Wax Paper","Paper","3000 ct","shahs","SWP","",51,1),
+ ("LWP","Large Wax Paper 15x10","Paper","3000 ct","rd","LWP","",None,1),
+ ("CW","Plastic Clear Wrap","Paper","24x2000","rd","CW","",None,1),
+ ("BBB","Beef Burger Box","Paper","402 ct","shahs","BBB","",89,1),
+ ("CBB","Chicken Burger Box","Paper","400 ct","shahs","CBB","",89,1),
+ ("FFC","French Fries Cup","Paper","1000 ct","shahs","FFC","",90,1),
+ ("SHFL","Halal Flame Labels","Paper","roll","shahs","SHFL","",None,1),
+ ("SNB","Nugget Box","Paper","600 pc","shahs","SNB","",88,1),
+ ("AHALF","Half Aluminum Pans","Paper","case","rd","AHALF","",None,1),
+ ("ALID","Half Aluminum Lids","Paper","case","rd","ALID","",None,1),
+ ("SHAHSPB","Paper Bags (Med Black)","Paper","250 ct","shahs","SHAHSPB","",45,1),
+ ("SP","Spoons","Paper","1000 ct","rd","SP","76069503023",20,1),
+ ("KN","Knives","Paper","1000 ct","rd","KN","",None,1),
+ ("Straw","Straws","Paper","300x6","rd","Straw","",None,1),
+ ("FS","Pop-Up Foil Sheets","Paper","500 ct","rd","FS","1160080",91,3),
+ ("TRP","Thermal Register Roll","Paper","3 1/8in","other","TRP","",None,1),
+ ("SLB","DoorDash Labels","Paper","roll","shahs","SLB","",19,1),
+ ("STGB","Wings Takeout Box","Paper","600 pc","shahs","STGB","",90,1),
+ ("NMB","Medium 1/8 Bags","Paper","case","shahs","NMB","",60,1),
+ ("NSB","Small Red 1/10 Bags","Paper","1500 pc","shahs","NSB","",50,1),
+ ("SFS","Foil Sheets","Paper","3000 pc","shahs","SFS","",180,1),
+ ("SBLG","Black Large Gloves","Paper","10/100","shahs","SBLG","",30,1),
+ ("BMG","Black Medium Gloves","Paper","10/100","shahs","BMG","",35,1),
+ ("SBXLG","Black XL Gloves","Paper","10/100","shahs","SBXLG","",30,1),
+ ("SBC","Briefcase Bags","Paper","360 pc","shahs","SBC","",115,1),
+ ("COKE","Coca-Cola 20oz","Drinks","24 pk","other","","",None,1),
+ ("DIETCOKE","Diet Coke 20oz","Drinks","24 pk","other","","",None,1),
+ ("SPRITE","Sprite 20oz","Drinks","24 pk","other","","",None,1),
+ ("FANTA","Fanta Orange 20oz","Drinks","24 pk","other","","",None,0),
+ ("WATER20","Bottled Water 20oz","Drinks","24 pk","other","","",None,1),
+ ("SNAP_APPLE","Snapple Apple","Drinks","12/16oz case","rd","","7618300328",24,1),
+ ("SNAP_KIWI","Snapple Kiwi Strawberry","Drinks","12/16oz case","rd","","7618300310",24,1),
+ ("SNAP_LEMON","Snapple Lemon (Sugar Free)","Drinks","12/16oz case","rd","","7618300320",24,1),
+ ("SNAP_MANGO","Snapple Mango","Drinks","12/16oz case","rd","","7618300312",24,1),
+ ("SNAP_PEACH","Snapple Peach","Drinks","12/16oz case","rd","","7618300311",24,1),
+ ("969","969 Grill Cleaner","Cleaning","9 gal","shahs","969","",None,1),
+ ("GS","Green Stud Dish Soap","Cleaning","ea","other","GS","",None,1),
+ ("Bleach","Bleach","Cleaning","ea","other","Bleach","",None,1),
+ ("SLC","Lavender Cleaner","Cleaning","ea","rd","SLC","",None,1),
+ ("MOPS","Mop Head","Cleaning","ea","other","MOPS","",None,1),
+ ("SWMC","Shah Warma Marinated Chicken","Specialty","ea","shahs","SWMC","",None,0),
+ ("FLP","Flat Large Pita 20oz","Specialty","ea","shahs","FLP","",None,0),
+ ("WPP","Pocket Pita","Specialty","60/3.5","shahs","WPP","",None,0),
+ ("ST","Toum Garlic Spread","Specialty","2-4 lb","shahs","ST","",None,1),
+ ("PICKLES","Shawarma Pickles","Specialty","6/4 lb","shahs","PICKLES","",None,0),
+ ("TP","Tomato Paste","Specialty","6/5 lb cans","rd","TP","2700038835",66,1),
+ ("SLG","Lamb Gyro","Specialty","ea","shahs","SLG","",None,0),
+ ("SBBB","Beef Bacon Bites","Specialty","ea","shahs","SBBB","",None,0),
+ ("SFALP","Falafel Patties","Specialty","ea","shahs","SFALP","",None,0),
+ ("TS","Tartar Sauce","Specialty","4/1 gal","rd","TS","76069521246",50,1),
+ ("LJ","Lemon Juice","Specialty","4/1 gal","shahs","LJ","",None,0),
+ ("SALTG","Salt","Specialty","4/1 gal","shahs","SALTG","",None,0),
+ ("CA","Citric Acid","Specialty","4/1 gal","shahs","CA","",None,0),
+ ("CS","Cheese Sauce","Specialty","6/5 lb cans","rd","CS","76069502456",49,1),
+ ("SPW","Party Wings","Specialty","ea","shahs","SPW","",None,0),
+ ("GPS","Garlic Parmesan Sauce","Specialty","ea","shahs","GPS","",None,0),
+ ("SRCS","Sweet Red Chili Wing Sauce","Specialty","4/2 qt","rd","SRCS","1340951639",44,0),
+ ("CHBBQ","Chipotle Honey BBQ","Specialty","ea","shahs","CHBBQ","",None,0),
+ ("KBWS","Buffalo Wing Sauce","Specialty","2/1 gal","rd","KBWS","1340951648",60,0),
+ ("LPS","Lemon Pepper Wing Sauce","Specialty","4/2 qt","rd","LPS","1340951796",53,0),
+ ("SFB","Fish Boxes","Specialty","ea","shahs","SFB","",None,0),
+ ("SPOP","Popup Foil Sheets","Specialty","ea","shahs","SPOP","",None,0),
+ ("SFSB","Falafel Sandwich Box","Specialty","ea","shahs","SFSB","",None,0),
+ ("PM","Pomegranate Molasses","Specialty","24/10 oz","shahs","PM","",None,0),
+ ("SC","Yellow Cheese 120 slice","Specialty","ea","shahs","SC","",None,0),
+]
+
+def _inv_pw_ok(con, pw):
+    real = get_setting(con, "inv_password", "1234")
+    return bool(pw) and str(pw) == str(real)
+
+def inv_compute(con, counts, overrides=None):
+    """counts: {code: on_hand}. Returns (rows_to_order, vendor_totals, est, num_counted)."""
+    overrides = overrides or {}
+    rows = {r["code"]: r for r in con.execute("SELECT * FROM inv_items").fetchall()}
+    out = []
+    vtot = {"shahs": 0, "rd": 0, "pfg": 0, "other": 0}
+    est = 0.0
+    ncount = 0
+    for code, oh in (counts or {}).items():
+        r = rows.get(code)
+        if r is None:
+            continue
+        try:
+            oh = float(oh)
+        except (TypeError, ValueError):
+            continue
+        ncount += 1
+        par = r["par"] or 0
+        qty = max(0, math.ceil(par - oh))
+        if code in overrides:
+            try:
+                qty = max(0, int(round(float(overrides[code]))))
+            except (TypeError, ValueError):
+                pass
+        if qty <= 0:
+            continue
+        v = r["vendor"] if r["vendor"] in vtot else "other"
+        vtot[v] += 1
+        price = r["price"] or 0
+        est += price * qty
+        out.append({"code": code, "name": r["name"], "cat": r["cat"], "unit": r["unit"],
+                    "vendor": v, "ims": r["ims"], "rd": r["rd"], "price": r["price"],
+                    "par": par, "on_hand": oh, "order": qty})
+
+    def _key(x):
+        if x["vendor"] == "shahs":
+            return (0, INV_RANK.get(x["ims"], 999), x["name"])
+        return (1, INV_CATS.index(x["cat"]) if x["cat"] in INV_CATS else 99, x["name"])
+    out.sort(key=_key)
+    return out, vtot, round(est, 2), ncount
+
+def inv_order_text(con, computed, counted_by, comment, ncount):
+    if not computed:
+        return "Nothing below par — no order needed."
+    byv = {}
+    for r in computed:
+        byv.setdefault(r["vendor"], []).append(r)
+    datestr = datetime.now(TZ()).strftime("%a %b %-d, %Y")
+    parts = ["INVENTORY ORDER - " + datestr + (" - counted by " + counted_by if counted_by else "")]
+    for v in ("shahs", "rd", "pfg", "other"):
+        items = byv.get(v)
+        if not items:
+            continue
+        parts.append("")
+        if v == "shahs":
+            parts.append("SHAH'S (IMS) - ims.shahshalalfood.com/requisitions/add  (type qty next to each code):")
+            for r in items:
+                parts.append("  %-10s %s - %s" % (r["ims"] or r["code"], r["name"], _inv_num(r["order"])))
+        else:
+            parts.append(INV_VNAME[v].upper() + ":")
+            est = 0
+            for r in items:
+                sub = (r["price"] or 0) * r["order"]
+                est += sub
+                line = "  [ ] " + r["name"] + (" (#%s)" % r["rd"] if r["rd"] else "") + " - " + _inv_num(r["order"]) + " x " + (r["unit"] or "")
+                if r["price"]:
+                    line += "  ~$%.0f" % sub
+                parts.append(line)
+            if est > 0:
+                parts.append("  Est. $%.0f" % est)
+    if comment:
+        parts += ["", "Note: " + comment]
+    return "\n".join(parts)
+
+def _inv_num(n):
+    n = float(n)
+    return str(int(n)) if n == int(n) else ("%g" % n)
+
+def inv_order_html(con, computed, counted_by, comment, ncount):
+    byv = {}
+    for r in computed:
+        byv.setdefault(r["vendor"], []).append(r)
+    html = ['<p style="font:14px Arial">Counted by <b>%s</b> - <b>%d</b> item(s) to order.</p>'
+            % (counted_by or "staff", len(computed))]
+    for v in ("shahs", "rd", "pfg", "other"):
+        items = byv.get(v)
+        if not items:
+            continue
+        html.append('<h3 style="margin:16px 0 4px;color:#1a1206;font:700 15px Arial">%s</h3>' % INV_VNAME[v])
+        if v == "shahs":
+            html.append('<div style="color:#888;font:12px Arial;margin-bottom:6px">ims.shahshalalfood.com/requisitions/add - in page order</div>')
+        rows = ['<table style="border-collapse:collapse;width:100%">',
+                '<tr><th %s>Item</th><th %s>Code/#</th><th %s>Qty</th></tr>' % (TH, TH, THR)]
+        est = 0
+        for r in items:
+            est += (r["price"] or 0) * r["order"]
+            cd = r["ims"] if v == "shahs" else ("#" + r["rd"] if r["rd"] else "")
+            rows.append('<tr><td %s>%s</td><td %s>%s</td><td %s><b>%s</b></td></tr>'
+                        % (TD, r["name"], TD, cd or "", TDR, _inv_num(r["order"])))
+        rows.append("</table>")
+        if v != "shahs" and est > 0:
+            rows.append('<div style="text-align:right;font:600 13px Arial;margin-top:4px">Est. $%.0f</div>' % est)
+        html.append("".join(rows))
+    if comment:
+        html.append('<p style="margin-top:14px;font:14px Arial"><b>Note:</b> %s</p>' % comment)
+    return email_wrap(con, "Inventory order", "".join(html))
+
+@app.route("/inventory")
+def inventory_page():
+    return render_template("inventory.html")
+
+@app.route("/api/inv/unlock", methods=["POST"])
+def inv_unlock():
+    con = db()
+    pw = str((request.get_json(force=True, silent=True) or {}).get("password", "")).strip()
+    if not _inv_pw_ok(con, pw):
+        return jsonify({"ok": False, "error": "Wrong inventory password."}), 403
+    items = [dict(r) for r in con.execute(
+        "SELECT code,name,cat,unit,vendor,ims,rd,price,par,active FROM inv_items ORDER BY sort_order").fetchall()]
+    return jsonify({"ok": True, "items": items, "cats": INV_CATS, "vnames": INV_VNAME,
+                    "deadline": get_setting(con, "inv_deadline", "Sunday"),
+                    "store": get_setting(con, "store_name")})
+
+@app.route("/api/inv/submit", methods=["POST"])
+def inv_submit():
+    con = db()
+    d = request.get_json(force=True, silent=True) or {}
+    if not _inv_pw_ok(con, str(d.get("password", "")).strip()):
+        return jsonify({"ok": False, "error": "Wrong inventory password."}), 403
+    counted_by = str(d.get("counted_by", "")).strip()
+    comment = str(d.get("comment", "")).strip()
+    computed, vtot, est, ncount = inv_compute(con, d.get("counts", {}) or {}, d.get("orders", {}) or {})
+    now = int(time.time())
+    cur = con.execute("INSERT INTO inv_counts(ts,counted_by,comment,totals,est,order_text) VALUES(?,?,?,?,?,?)",
+                      (now, counted_by, comment, json.dumps(vtot), est, ""))
+    cid = cur.lastrowid
+    for r in computed:
+        con.execute("INSERT INTO inv_count_lines(count_id,code,on_hand,order_qty) VALUES(?,?,?,?)",
+                    (cid, r["code"], r["on_hand"], r["order"]))
+    text = inv_order_text(con, computed, counted_by, comment, ncount)
+    con.execute("UPDATE inv_counts SET order_text=? WHERE id=?", (text, cid))
+    audit(con, counted_by or "staff", "inventory_submit", "count %d: %d to order" % (cid, len(computed)))
+    con.commit()
+    emailed, emsg = False, ""
+    to = get_setting(con, "inv_order_to") or get_setting(con, "report_email") or get_setting(con, "smtp_user")
+    if to and computed:
+        subject = "Inventory order - " + datetime.now(TZ()).strftime("%a %b %-d")
+        emailed, emsg = _send(con, to, subject, inv_order_html(con, computed, counted_by, comment, ncount),
+                              text, "inventory")
+    return jsonify({"ok": True, "count_id": cid, "vendor_totals": vtot, "est": est,
+                    "items": len(computed), "counted": ncount, "emailed": emailed,
+                    "email_msg": emsg, "order_text": text})
+
+@app.route("/api/admin/inv/items", methods=["GET", "POST"])
+def admin_inv_items():
+    require_admin()
+    con = db()
+    if request.method == "GET":
+        items = [dict(r) for r in con.execute(
+            "SELECT code,name,cat,unit,vendor,ims,rd,price,par,active FROM inv_items ORDER BY sort_order").fetchall()]
+        return jsonify({"items": items, "vnames": INV_VNAME, "cats": INV_CATS})
+    d = request.get_json(force=True, silent=True) or {}
+    ups = d.get("updates", []) or []
+    for u in ups:
+        try:
+            par = float(u.get("par", 0) or 0)
+        except (TypeError, ValueError):
+            par = 0
+        ven = u.get("vendor", "other")
+        if ven not in INV_VNAME:
+            ven = "other"
+        con.execute("UPDATE inv_items SET par=?, vendor=?, active=? WHERE code=?",
+                    (par, ven, 1 if u.get("active", 1) else 0, u.get("code")))
+    audit(con, "admin", "inv_items", "%d items" % len(ups))
+    con.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/inv/counts")
+def admin_inv_counts():
+    require_admin()
+    con = db()
+    rows = con.execute(
+        "SELECT id,ts,counted_by,comment,totals,est FROM inv_counts ORDER BY id DESC LIMIT 60").fetchall()
+    out = []
+    for r in rows:
+        try:
+            tot = json.loads(r["totals"] or "{}")
+        except Exception:
+            tot = {}
+        out.append({"id": r["id"], "ts": r["ts"], "counted_by": r["counted_by"],
+                    "comment": r["comment"], "totals": tot, "est": r["est"]})
+    return jsonify({"counts": out})
+
+@app.route("/api/admin/inv/count/<int:cid>")
+def admin_inv_count(cid):
+    require_admin()
+    con = db()
+    r = con.execute("SELECT * FROM inv_counts WHERE id=?", (cid,)).fetchone()
+    if not r:
+        abort(404)
+    lines = [dict(x) for x in con.execute(
+        "SELECT code,on_hand,order_qty FROM inv_count_lines WHERE count_id=?", (cid,)).fetchall()]
+    return jsonify({"id": r["id"], "ts": r["ts"], "counted_by": r["counted_by"],
+                    "comment": r["comment"], "order_text": r["order_text"], "lines": lines})
 
 # ----------------------------------------------------------------------------
 # EMAIL
