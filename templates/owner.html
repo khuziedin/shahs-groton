@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Owner — Shah's Halal</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#14110e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Shah's Owner">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:#14110e;color:#f4efe7;
+    font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-text-size-adjust:100%}
+  .top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;
+    padding:12px 14px;background:#14110e;border-bottom:1px solid #2a241d}
+  .top img{width:34px;height:34px;border-radius:9px}
+  .top .t{flex:1;min-width:0}
+  .top b{display:block;font-size:15px;line-height:1.1}
+  .top span{font-size:11px;color:#b06d10;font-weight:600;letter-spacing:.05em;text-transform:uppercase}
+  .top button{border:1px solid #3a342c;background:#211c16;color:#f4efe7;border-radius:10px;
+    padding:8px 11px;font-size:13px;font-weight:600;cursor:pointer}
+  .wrap{padding:14px;max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+  .card{background:#1c1811;border:1px solid #2a241d;border-radius:16px;padding:15px}
+  .card h2{margin:0 0 10px;font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:#c9bdac;font-weight:700}
+  .tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .tile{background:#1c1811;border:1px solid #2a241d;border-radius:16px;padding:14px}
+  .tile .n{font-size:28px;font-weight:800;line-height:1}
+  .tile .l{font-size:12px;color:#9a8f80;margin-top:6px;text-transform:uppercase;letter-spacing:.04em}
+  .tile.accent .n{color:#58c27d}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid #241f18}
+  .row:last-child{border-bottom:0}
+  .row .nm{font-size:16px;font-weight:600}
+  .row .meta{font-size:13px;color:#9a8f80}
+  .pill{display:inline-block;font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;background:#13331f;color:#58c27d;margin-left:8px}
+  .pill.ot{background:#3a2412;color:#f0a35e}
+  .dot{width:9px;height:9px;border-radius:50%;background:#58c27d;display:inline-block;margin-right:8px;box-shadow:0 0 0 3px rgba(88,194,125,.18)}
+  .empty{color:#8a8072;font-size:14px;padding:6px 0}
+  .links{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .links a{display:block;text-align:center;padding:14px 10px;border-radius:13px;background:#211c16;border:1px solid #352e25;
+    color:#f4efe7;text-decoration:none;font-weight:600;font-size:14px}
+  .links a:active{opacity:.8}
+  .foot{color:#6f655a;font-size:12px;text-align:center;padding:4px 0 24px}
+  .note{color:#c9992e;font-size:12px;background:#2a2110;border:1px solid #4a3a16;border-radius:10px;padding:8px 11px}
+  .loading{color:#9a8f80;text-align:center;padding:40px 0}
+</style>
+</head>
+<body>
+<header class="top">
+  <img src="/static/logo.png" alt="">
+  <div class="t"><b id="store">Shah's Halal</b><span>Owner Dashboard</span></div>
+  <button id="refresh" title="Refresh">↻</button>
+  <button id="logout">Sign out</button>
+</header>
+<div class="wrap" id="root">
+  <div class="loading">Loading…</div>
+</div>
+<script src="/static/owner.js"></script>
+</body>
+</html>

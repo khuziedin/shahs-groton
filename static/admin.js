@@ -46,7 +46,7 @@
   function show(){
     const root=$("#root"); root.innerHTML="";
     const tabs=el("div","tabs");
-    [["dashboard","Dashboard"],["report","Report"],["timesheet","Timesheet"],["team","Team"],["inventory","Inventory"],["photos","Photos"],["audit","Activity log"],["settings","Settings"]].forEach(([k,label])=>{
+    [["dashboard","Dashboard"],["report","Report"],["timesheet","Timesheet"],["team","Team"],["photos","Photos"],["audit","Activity log"],["settings","Settings"]].forEach(([k,label])=>{
       const t=el("button","tab"+(S.tab===k?" on":""),label); t.onclick=()=>{S.tab=k;show();}; tabs.appendChild(t);
     });
     root.appendChild(tabs);
@@ -57,7 +57,6 @@
     else if(S.tab==="team")renderTeam(body);
     else if(S.tab==="photos")renderPhotos(body);
     else if(S.tab==="audit")renderAudit(body);
-    else if(S.tab==="inventory")renderInventory(body);
     else renderSettings(body);
   }
   function loadingInto(b){b.innerHTML='<div class="loading"><div class="spin"></div><div>Loading…</div></div>';}
@@ -281,9 +280,28 @@
     const mk=(label,u)=>{const d=el("div","kv");const sp=el("span",null,label);const code=el("b");code.style.fontFamily="var(--font-mono)";code.style.userSelect="all";code.textContent=u;const cp=el("button","btn sm","Copy");cp.style.marginLeft="8px";cp.onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(u).then(()=>toast("Copied")).catch(()=>toast(u));};const right=el("div");right.style.display="flex";right.style.alignItems="center";right.appendChild(code);right.appendChild(cp);d.appendChild(sp);d.appendChild(right);return d;};
     ca.appendChild(mk("Kiosk",url));
     ca.appendChild(mk("Manager",url+"/admin"));
-    const tip=el("p","muted small mt");tip.innerHTML="Tip: bookmark the Manager address on your laptop. To reach it from <b>outside</b> the restaurant (home, on the road), ask to set up Tailscale — a free, secure remote link.";
+    const tip=el("p","muted small mt");tip.innerHTML="Tip: bookmark the Manager address on your laptop while on shop Wi-Fi. For your phone from anywhere, use the Owner dashboard below.";
     ca.appendChild(tip);
     b.appendChild(ca);
+
+    // owner phone dashboard + remote login
+    const cor=card("Owner phone dashboard","A private, phone-friendly view just for you — who's on now, today's & this week's hours and labor cost. Protected by an owner password you set here.");
+    cor.appendChild(mk("Your dashboard",url+"/owner"));
+    const opStatus=el("p","muted small");opStatus.style.margin="4px 0 10px";
+    opStatus.textContent=(s.owner_login_set==="1")?"✓ Owner password is set.":"No owner password set yet — set one below to turn this on.";
+    cor.appendChild(opStatus);
+    const opw=inp("password",(s.owner_login_set==="1")?"Enter a new password to change it":"Create an owner password");
+    opw.autocomplete="new-password";
+    cor.appendChild(field("Owner password",opw));
+    cor.appendChild(saveBtn("Save password",async()=>{
+      const v=opw.value.trim();
+      if(v.length<6){toast("Use at least 6 characters");return;}
+      await api("/api/admin/settings",{method:"POST",body:JSON.stringify({owner_password:v})});
+      opw.value="";opStatus.textContent="✓ Owner password is set.";toast("Owner password saved");
+    }));
+    const otip=el("p","muted small mt");otip.innerHTML="To open this from <b>anywhere with no VPN on your phone</b>: install <b>Tailscale</b> on the tablet and turn on <b>Funnel</b> — you get a permanent <b>https</b> link to bookmark. Over that link the whole app requires this owner password; the clock-in screen stays open only on shop Wi-Fi.";
+    cor.appendChild(otip);
+    b.appendChild(cor);
 
     // software updates
     const cu=card("Software updates","Pull the latest version from GitHub and restart. Your data is never touched, and a broken update rolls back on its own.");
@@ -321,7 +339,7 @@
 
     // email credentials
     const c2=card("Email setup","How the tablet sends your reports. Set this once.");
-    const method=sel([["smtp","Gmail direct (app password)"],["gmail_api","Gmail API (your account, port 443)"],["brevo","Email service (Brevo)"]],s.email_method||"smtp");
+    const method=sel([["smtp","Gmail direct"],["brevo","Email service (use if Gmail won't send)"]],s.email_method||"smtp");
     const su=inp("email","your.gmail@gmail.com");su.value=s.smtp_user||"";
     const sp=inp("password",s.smtp_pass_set==="1"?"•••••••• (saved — leave blank to keep)":"16-char app password");
     const bk=inp("password",s.brevo_key_set==="1"?"•••••••• (saved — leave blank to keep)":"paste your Brevo API key");
@@ -330,10 +348,9 @@
     const gmailF=field("Gmail App Password",sp);
     const brevoF=field("Email-service API key (Brevo)",bk);
     c2.appendChild(field("Sender email address",su));
-    const apiNote=el("p","muted small");apiNote.innerHTML="Sends through your own Google account over port 443 — no Brevo, no app password. Credentials live in <b>data/credentials.json</b> on the tablet (set up once with get_gmail_token.py — see CREDENTIALS_SETUP.md).";
-    c2.appendChild(gmailF); c2.appendChild(brevoF); c2.appendChild(apiNote);
+    c2.appendChild(gmailF); c2.appendChild(brevoF);
     c2.appendChild(field("Owner — send my reports to",em));
-    const syncMethod=()=>{const m=method.value;gmailF.style.display=m==="smtp"?"":"none";brevoF.style.display=m==="brevo"?"":"none";apiNote.style.display=m==="gmail_api"?"":"none";};
+    const syncMethod=()=>{const m=method.value;gmailF.style.display=m==="smtp"?"":"none";brevoF.style.display=m==="brevo"?"":"none";};
     method.onchange=syncMethod; syncMethod();
     c2.appendChild(saveBtn("Save email setup",async()=>{
       const body={smtp_user:su.value.trim(),report_email:em.value.trim(),email_method:method.value};
@@ -425,69 +442,6 @@
     const lk=el("button","btn","Lock manager console");lk.onclick=()=>{try{sessionStorage.removeItem("tc_tok");}catch(e){}renderLock();};
     c5.appendChild(lk);b.appendChild(c5);
   }
-  /* ---------- inventory ---------- */
-  function escH(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
-  async function renderInventory(b){
-    loadingInto(b);
-    let s={},inv={items:[],vnames:{}},hist={counts:[]};
-    try{ s=await api("/api/admin/settings"); inv=await api("/api/admin/inv/items"); hist=await api("/api/admin/inv/counts"); }
-    catch(e){ return; }
-    b.innerHTML="";
-    const VN=inv.vnames||{shahs:"Shah's (IMS)",rd:"Restaurant Depot",pfg:"PFG",other:"Other"};
-
-    // settings
-    const c1=card("Inventory counter","The password staff type to open the Inventory screen, and where finished orders are emailed.");
-    const pw=inp("text","a word only staff know");pw.value=s.inv_password||"";
-    const dl=inp("text","e.g. Sunday 3pm");dl.value=s.inv_deadline||"Sunday";
-    const to=inp("email","blank = your reports email");to.value=s.inv_order_to||"";
-    c1.appendChild(field("Inventory password",pw));
-    c1.appendChild(field("Order deadline (shown on the count screen)",dl));
-    c1.appendChild(field("Email finished orders to",to));
-    c1.appendChild(saveBtn("Save",async()=>{await api("/api/admin/settings",{method:"POST",body:JSON.stringify({inv_password:pw.value.trim()||"1234",inv_deadline:dl.value.trim()||"Sunday",inv_order_to:to.value.trim()})});toast("Saved");}));
-    b.appendChild(c1);
-
-    // history
-    const c2=card("Recent counts","Every submitted count and the order it produced.");
-    if(!hist.counts.length){const e=el("p","muted small");e.textContent="No counts yet — do one on the tablet's Inventory screen.";c2.appendChild(e);}
-    else hist.counts.forEach(h=>{
-      const r=el("div","setcard");r.style.cssText="margin-bottom:8px;padding:11px 13px";const t=h.totals||{};
-      r.innerHTML='<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap"><b>'+new Date(h.ts*1000).toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})+'</b><span class="muted small">'+escH(h.counted_by||"—")+'</span></div><div class="muted small" style="margin-top:4px">Shah\'s '+(t.shahs||0)+' · RD '+(t.rd||0)+' · PFG '+(t.pfg||0)+(h.est?' · ~$'+Math.round(h.est):'')+'</div>';
-      const vb=el("button","btn sm","View order");vb.style.marginTop="8px";
-      const pre=el("pre");pre.style.cssText="display:none;white-space:pre-wrap;font:12px ui-monospace,monospace;background:#faf7f2;border:1px solid #e6ddd0;border-radius:8px;padding:10px;margin-top:8px;max-height:300px;overflow:auto;color:#2a2117";
-      vb.onclick=async()=>{ if(pre.style.display==="none"){ if(!pre.textContent){const d=await api("/api/admin/inv/count/"+h.id);pre.textContent=d.order_text||"(no order)";} pre.style.display="block";vb.textContent="Hide order"; } else {pre.style.display="none";vb.textContent="View order";} };
-      r.appendChild(vb);r.appendChild(pre);c2.appendChild(r);
-    });
-    b.appendChild(c2);
-
-    // par / vendor editor
-    const c3=card("Par levels & vendors","Par = how much to keep on hand; Order = Par − On hand. Set the vendor so each item routes to the right list — flip items you buy from PFG here.");
-    const srch=inp("search","Filter items…");c3.appendChild(srch);
-    const listWrap=el("div");listWrap.style.cssText="max-height:60vh;overflow:auto;margin-top:10px";c3.appendChild(listWrap);
-    const edits={};
-    function touch(i){edits[i.code]=edits[i.code]||{code:i.code,par:i.par,vendor:i.vendor,active:i.active};return edits[i.code];}
-    function drawItems(){
-      const q=(srch.value||"").toLowerCase();listWrap.innerHTML="";let cur=null;
-      inv.items.filter(i=>!q||(i.name+" "+i.code+" "+(i.ims||"")).toLowerCase().includes(q)).forEach(i=>{
-        if(i.cat!==cur){cur=i.cat;const h=el("div");h.textContent=cur;h.style.cssText="font:700 12px/1 Arial;letter-spacing:.08em;text-transform:uppercase;color:#b3a894;margin:14px 0 6px";listWrap.appendChild(h);}
-        const row=el("div");row.style.cssText="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #eee5d8";
-        const nm=el("div");nm.style.cssText="flex:1;min-width:0";nm.innerHTML='<div style="font-weight:600;font-size:14px">'+escH(i.name)+'</div><div class="muted small">'+(i.ims?escH(i.ims)+' · ':'')+escH(i.unit||'')+'</div>';
-        const vs=sel([["shahs",VN.shahs],["rd",VN.rd],["pfg",VN.pfg],["other",VN.other]],i.vendor);vs.style.cssText="padding:7px;font-size:13px";
-        const pi=inp("number","");pi.value=i.par;pi.min=0;pi.style.cssText="width:58px;text-align:center;font-weight:700";
-        vs.onchange=()=>{touch(i).vendor=vs.value;};
-        pi.oninput=()=>{touch(i).par=pi.value;};
-        const pl=el("div");pl.style.cssText="text-align:center";pl.innerHTML='<div class="muted" style="font-size:9px;text-transform:uppercase;letter-spacing:.4px;font-weight:700">Par</div>';pl.appendChild(pi);
-        row.appendChild(nm);row.appendChild(vs);row.appendChild(pl);listWrap.appendChild(row);
-      });
-    }
-    srch.oninput=drawItems;drawItems();
-    c3.appendChild(saveBtn("Save par & vendor changes",async()=>{
-      const updates=Object.values(edits);if(!updates.length){toast("No changes to save");return;}
-      await api("/api/admin/inv/items",{method:"POST",body:JSON.stringify({updates})});
-      toast("Saved "+updates.length+" item(s)");for(const k in edits)delete edits[k];
-    }));
-    b.appendChild(c3);
-  }
-
   function renderSettingsReload(){if(S.tab==="settings")show();}
   function card(title,desc){const c=el("div","setcard");c.innerHTML='<h3>'+title+'</h3>'+(desc?'<p>'+desc+'</p>':'');return c;}
   function field(lab,node){const f=el("div","field");const l=el("label",null,lab);f.appendChild(l);f.appendChild(node);return f;}

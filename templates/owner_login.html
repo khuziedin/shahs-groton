@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Owner Login — Shah's Halal</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#14110e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#14110e;color:#f4efe7;
+    font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:28px 20px;gap:18px}
+  .logo{width:72px;height:72px;border-radius:16px;display:block}
+  h1{font-size:19px;margin:0;font-weight:700;text-align:center}
+  .sub{color:#b06d10;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-top:-10px}
+  form{width:100%;max-width:340px;display:flex;flex-direction:column;gap:12px;margin-top:6px}
+  input{width:100%;padding:15px 16px;font-size:17px;border-radius:12px;border:1px solid #3a342c;
+    background:#211c16;color:#fff;outline:none}
+  input:focus{border-color:#b06d10}
+  button{width:100%;padding:15px;font-size:17px;font-weight:700;border:0;border-radius:12px;
+    background:#b06d10;color:#fff;cursor:pointer}
+  button:active{opacity:.85}
+  .err{color:#ff9a8a;font-size:14px;min-height:18px;text-align:center}
+  .note{color:#9a8f80;font-size:13px;text-align:center;max-width:320px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <img class="logo" src="/static/logo.png" alt="Shah's Halal">
+  <div style="text-align:center">
+    <h1 id="store">Shah's Halal — Groton</h1>
+    <div class="sub">Owner Access</div>
+  </div>
+  {% if need_setup %}
+  <div class="note">No owner password is set yet. On the tablet, open <b>Manager → Settings → Remote access (your phone)</b> and set one, then come back here.</div>
+  {% else %}
+  <form id="f" autocomplete="on">
+    <input id="pw" type="password" inputmode="text" placeholder="Owner password" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+  {% endif %}
+</div>
+<script>
+  try { document.getElementById('store').textContent = {{ store|tojson }}; } catch(e){}
+  var f = document.getElementById('f');
+  if (f) f.addEventListener('submit', async function(e){
+    e.preventDefault();
+    var err = document.getElementById('err'); err.textContent = '';
+    var pw = document.getElementById('pw').value;
+    try {
+      var r = await fetch('/owner/login', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({password: pw}), credentials:'same-origin'});
+      var j = await r.json().catch(function(){return {};});
+      if (r.ok && j.ok) { location.href = '/owner'; return; }
+      err.textContent = j.error || 'Sign-in failed.';
+    } catch(ex) { err.textContent = 'Network error — try again.'; }
+  });
+</script>
+</body>
+</html>
