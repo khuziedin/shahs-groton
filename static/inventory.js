@@ -194,5 +194,21 @@
 
   function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 
-  renderGate();
+  // Owner (signed into the phone app) skips the inventory password; staff on the
+  // tablet still get the lock screen.
+  async function boot(){
+    try{
+      const r=await api("/api/inv/unlock",{password:""});
+      if(r.status===200 && r.json && r.json.ok){
+        const j=r.json;
+        S.items=j.items;S.byId={};j.items.forEach(i=>S.byId[i.code]=i);
+        S.cats=j.cats;S.vnames=j.vnames;S.deadline=j.deadline||"Sunday";
+        if(j.store){const ss=$("#storeSub");if(ss)ss.textContent=String(j.store).split("—")[0].trim();}
+        renderCount();
+        return;
+      }
+    }catch(e){}
+    renderGate();
+  }
+  boot();
 })();
