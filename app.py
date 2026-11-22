@@ -491,22 +491,59 @@ def admin_login():
                         "store": get_setting(con, "store_name")})
     return jsonify({"ok": False, "error": "Incorrect manager PIN"}), 401
 
+def _labor_between(con, start, end):
+    """Hours and labor $ worked within [start, end), counting each punch's overlap."""
+    now = int(time.time())
+    rows = con.execute("""SELECT p.clock_in, p.clock_out, e.rate FROM punches p
+                          JOIN employees e ON e.id=p.emp_id
+                          WHERE p.clock_in < ? AND COALESCE(p.clock_out, ?) > ?""", (end, now, start)).fetchall()
+    hrs = lab = 0.0
+    for p in rows:
+        a = max(p["clock_in"], start); b = min(p["clock_out"] or now, end)
+        if b > a:
+            h = (b - a) / 3600.0; hrs += h; lab += h * (p["rate"] or 0)
+    return round(hrs, 2), round(lab, 2)
+
 @app.route("/api/admin/dashboard")
 def admin_dashboard():
     require_admin()
     con = db()
     wk = this_week_key()
     rows, tot = compute_week(con, wk)
-    # who's on now + today hours + today labor $
+    now = int(time.time())
+    # who's on now (with clock-in photo)
     open_p = con.execute("""SELECT p.*, e.name, e.rate FROM punches p JOIN employees e ON e.id=p.emp_id
                             WHERE p.clock_out IS NULL ORDER BY p.clock_in""").fetchall()
-    now = int(time.time())
-    today_start = int(datetime.now(TZ()).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-    today_punches = con.execute("SELECT * FROM punches WHERE clock_in>=?", (today_start,)).fetchall()
-    today_hours = sum(((p["clock_out"] or now) - p["clock_in"]) / 3600.0 for p in today_punches)
-    on_now = [{"name": r["name"], "since": r["clock_in"],
+    on_now = [{"name": r["name"], "since": r["clock_in"], "photo": r["photo"],
                "elapsed_h": round((now - r["clock_in"]) / 3600.0, 2)} for r in open_p]
-    # OT warnings: anyone within 5h of their threshold or over
+    # today's hours + labor cost
+    today_start = int(datetime.now(TZ()).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    today_punches = con.execute("""SELECT p.clock_in, p.clock_out, e.rate FROM punches p
+                                   JOIN employees e ON e.id=p.emp_id WHERE p.clock_in>=?""", (today_start,)).fetchall()
+    today_hours = sum(((p["clock_out"] or now) - p["clock_in"]) / 3600.0 for p in today_punches)
+    today_labor = sum(((p["clock_out"] or now) - p["clock_in"]) / 3600.0 * (p["rate"] or 0) for p in today_punches)
+    # recent clock in/out events (activity feed)
+    rec = con.execute("""SELECT p.clock_in, p.clock_out, p.photo, p.photo_out, e.name
+                         FROM punches p JOIN employees e ON e.id=p.emp_id
+                         ORDER BY p.clock_in DESC LIMIT 25""").fetchall()
+    events = []
+    for p in rec:
+        events.append({"name": p["name"], "action": "in", "ts": p["clock_in"], "photo": p["photo"]})
+        if p["clock_out"]:
+            events.append({"name": p["name"], "action": "out", "ts": p["clock_out"], "photo": p["photo_out"]})
+    events.sort(key=lambda x: x["ts"], reverse=True)
+    recent = events[:8]
+    # pace vs last week — same elapsed point (week-to-date) and same weekday last week
+    wk_start, _ = week_bounds(wk)
+    tw_h, tw_l = _labor_between(con, wk_start, now)
+    lw_h, lw_l = _labor_between(con, wk_start - 7 * 86400, now - 7 * 86400)
+    td_h, td_l = _labor_between(con, today_start, now)
+    ltd_h, ltd_l = _labor_between(con, today_start - 7 * 86400, now - 7 * 86400)
+    compare = {
+        "wtd":   {"hours": tw_h, "labor": tw_l, "prev_hours": lw_h, "prev_labor": lw_l},
+        "today": {"hours": td_h, "labor": td_l, "prev_hours": ltd_h, "prev_labor": ltd_l},
+    }
+    # OT warnings: anyone within 15% of their threshold or over
     warn = [r for r in rows if r["ot"] > 0 or (r["hrs"] >= 0.85 * (
              (con.execute("SELECT ot_threshold FROM employees WHERE id=?", (r["id"],)).fetchone()[0]) or 40))]
     return jsonify({
@@ -514,6 +551,9 @@ def admin_dashboard():
         "week": wk, "rows": rows, "totals": tot,
         "on_now": on_now,
         "today_hours": round(today_hours, 2),
+        "today_labor": round(today_labor, 2),
+        "compare": compare,
+        "recent": recent,
         "ot_warnings": [{"name": r["name"], "hrs": r["hrs"], "ot": r["ot"]} for r in warn],
         "wages_placeholder": get_setting(con, "wages_placeholder") == "1",
     })
