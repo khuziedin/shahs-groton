@@ -1,11 +1,13 @@
 // Shared bottom navigation for the manager/owner pages (not the staff kiosk).
+// Role-aware: the owner sees Home/Schedule/Inventory/Console; a manager (no
+// owner session) sees only Inventory/Console.
 (function () {
-  var items = [
-    { href: "/owner",     label: "Home",      icon: "⌂" },
-    { href: "/schedule",  label: "Schedule",  icon: "▦" },
-    { href: "/inventory", label: "Inventory", icon: "▤" },
-    { href: "/admin",     label: "Console",   icon: "⚙" }
-  ];
+  var ALL = {
+    home:  { href: "/owner",     label: "Home",      icon: "⌂" },
+    sched: { href: "/schedule",  label: "Schedule",  icon: "▦" },
+    inv:   { href: "/inventory", label: "Inventory", icon: "▤" },
+    con:   { href: "/admin",     label: "Console",   icon: "⚙" }
+  };
   var path = location.pathname.replace(/\/$/, "") || "/";
 
   var css =
@@ -22,25 +24,29 @@
   st.textContent = css;
   document.head.appendChild(st);
 
-  var bar = document.createElement("nav");
-  bar.id = "mnav";
-  items.forEach(function (it) {
-    var a = document.createElement("a");
-    a.href = it.href;
-    var on = (it.href === "/owner")
-      ? (path === "/owner" || path === "/")
-      : (path.indexOf(it.href) === 0);
-    if (on) a.className = "on";
-    a.innerHTML = '<span class="i">' + it.icon + "</span>" + it.label;
-    bar.appendChild(a);
-  });
-
-  function mount() {
-    document.body.appendChild(bar);
-    // keep page content clear of the fixed bar
-    var pad = "76px";
-    try { document.body.style.paddingBottom = pad; } catch (e) {}
+  function build(items) {
+    var bar = document.createElement("nav");
+    bar.id = "mnav";
+    items.forEach(function (it) {
+      var a = document.createElement("a");
+      a.href = it.href;
+      var on = (it.href === "/owner") ? (path === "/owner" || path === "/") : (path.indexOf(it.href) === 0);
+      if (on) a.className = "on";
+      a.innerHTML = '<span class="i">' + it.icon + "</span>" + it.label;
+      bar.appendChild(a);
+    });
+    function mount() {
+      document.body.appendChild(bar);
+      try { document.body.style.paddingBottom = "76px"; } catch (e) {}
+    }
+    if (document.body) mount();
+    else document.addEventListener("DOMContentLoaded", mount);
   }
-  if (document.body) mount();
-  else document.addEventListener("DOMContentLoaded", mount);
+
+  fetch("/api/whoami", { credentials: "same-origin" })
+    .then(function (r) { return r.ok ? r.json() : {}; })
+    .then(function (w) {
+      build((w && w.owner) ? [ALL.home, ALL.sched, ALL.inv, ALL.con] : [ALL.inv, ALL.con]);
+    })
+    .catch(function () { build([ALL.inv, ALL.con]); });
 })();

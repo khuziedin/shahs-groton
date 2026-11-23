@@ -93,7 +93,8 @@ DEFAULT_SETTINGS = {
     "inv_order_to": "",          # where finished orders email to (blank = owner report_email)
     "sched_areas": "Kitchen,Front",  # scheduling areas (comma-separated); editable later
     "sched_open": "10:00",       # schedule coverage timeline start
-    "sched_close": "23:00",      # schedule coverage timeline end
+    "sched_close": "23:00",      # operating close Sun–Thu (11pm)
+    "sched_close_wknd": "24:00", # operating close Fri & Sat (midnight)
 }
 
 # Generic samples, only used to seed a brand-new install so it isn't empty.
@@ -382,6 +383,32 @@ def valid_owner_cookie(con):
         return False
     return hmac.compare_digest(sig, _sign(con, "owner|" + str(exp)))
 
+MGR_COOKIE = "tc_mgr"
+def make_mgr_cookie(con):
+    exp = int(time.time()) + 12 * 3600  # 12h manager session
+    return f"{exp}.{_sign(con, 'mgr|' + str(exp))}"
+
+def valid_mgr_cookie(con):
+    c = request.cookies.get(MGR_COOKIE, "")
+    if "." not in c:
+        return False
+    exp_s, sig = c.split(".", 1)
+    try:
+        exp = int(exp_s)
+    except ValueError:
+        return False
+    if exp < time.time():
+        return False
+    return hmac.compare_digest(sig, _sign(con, "mgr|" + str(exp)))
+
+def is_staff(con):
+    """A logged-in manager (PIN session) or the owner."""
+    return valid_owner_cookie(con) or valid_mgr_cookie(con)
+
+def require_owner():
+    if not valid_owner_cookie(db()):
+        abort(401)
+
 def is_public_host():
     """True when the request arrived over a public URL (e.g. a Tailscale Funnel
     or Cloudflare tunnel), as opposed to localhost or the shop LAN."""
@@ -395,7 +422,7 @@ def is_public_host():
 
 def require_admin():
     con = db()
-    if valid_owner_cookie(con):   # owner's remote session
+    if valid_owner_cookie(con) or valid_mgr_cookie(con):   # owner or manager session
         return
     auth = request.headers.get("Authorization", "")
     tok = auth[7:] if auth.startswith("Bearer ") else ""
@@ -413,7 +440,7 @@ def _public_gate():
         return
     # The public link is the OWNER's entry point — the root sends to the owner
     # dashboard, never the staff clock-in kiosk (which is LAN-only).
-    if request.path in ("/", "/kiosk"):
+    if request.path == "/":
         return redirect("/owner")
     con = db()
     if valid_owner_cookie(con):
@@ -433,12 +460,24 @@ def _public_gate():
 def kiosk_page():
     return render_template("kiosk.html")
 
+@app.route("/kiosk")
+def kiosk_page2():
+    # reachable from the owner phone app too (owner-gated over the public link)
+    return render_template("kiosk.html")
+
+@app.route("/api/whoami")
+def api_whoami():
+    con = db()
+    return jsonify({"owner": valid_owner_cookie(con), "staff": is_staff(con)})
+
 @app.route("/admin")
 def admin_page():
     return render_template("admin.html")
 
 @app.route("/owner")
 def owner_page():
+    if not valid_owner_cookie(db()):      # owner-only, every host
+        return redirect("/owner/login")
     return render_template("owner.html")
 
 LOGIN_FAILS = {}  # ip -> (fail_count, lock_until)
@@ -550,8 +589,11 @@ def admin_login():
     con = db()
     if str(data.get("pin", "")) == get_setting(con, "admin_pin", "1234"):
         audit(con, "admin", "login", ""); con.commit()
-        return jsonify({"ok": True, "token": new_token(),
-                        "store": get_setting(con, "store_name")})
+        resp = make_response(jsonify({"ok": True, "token": new_token(),
+                                      "store": get_setting(con, "store_name")}))
+        resp.set_cookie(MGR_COOKIE, make_mgr_cookie(con), max_age=12 * 3600,
+                        httponly=True, samesite="Lax", secure=is_public_host(), path="/")
+        return resp
     return jsonify({"ok": False, "error": "Incorrect manager PIN"}), 401
 
 def _labor_between(con, start, end):
@@ -1239,6 +1281,11 @@ def _hhmm_to_min(s):
     except Exception:
         return None
 
+def _min_to_hhmm12(m):
+    m = int(m); h = m // 60; mm = m % 60
+    ap = "AM" if h < 12 else "PM"; hh = (h % 12) or 12
+    return f"{hh}:{mm:02d} {ap}"
+
 def _week_days(week_key_str):
     y, mo, da = [int(x) for x in week_key_str.split("-")]
     start = date(y, mo, da)
@@ -1246,11 +1293,13 @@ def _week_days(week_key_str):
 
 @app.route("/schedule")
 def schedule_page():
+    if not valid_owner_cookie(db()):      # owner-only
+        return redirect("/owner/login")
     return render_template("schedule.html")
 
 @app.route("/api/sched")
 def api_sched():
-    require_admin()
+    require_owner()
     con = db()
     wk = request.args.get("week") or this_week_key()
     days = _week_days(wk)
@@ -1266,12 +1315,13 @@ def api_sched():
         "week": wk, "days": days, "employees": emps, "shifts": shifts, "areas": areas,
         "open": get_setting(con, "sched_open", "10:00"),
         "close": get_setting(con, "sched_close", "23:00"),
+        "close_wknd": get_setting(con, "sched_close_wknd", "24:00"),
         "store": get_setting(con, "store_name"),
     })
 
 @app.route("/api/sched/shift", methods=["POST"])
 def api_sched_shift():
-    require_admin()
+    require_owner()
     con = db()
     d = request.get_json(force=True, silent=True) or {}
     day = str(d.get("day", "")).strip()
@@ -1282,7 +1332,9 @@ def api_sched_shift():
     if not day or not emp_id or sm is None or em is None:
         return jsonify({"ok": False, "error": "Pick a person, area, and times."}), 400
     if em <= sm:
-        return jsonify({"ok": False, "error": "End time must be after start time."}), 400
+        em += 1440   # end is next morning (e.g. 5:00 PM – 12:30 AM close)
+    if em - sm > 20 * 60:
+        return jsonify({"ok": False, "error": "That shift is over 20 hours — check the times."}), 400
     sid = d.get("id")
     if sid:
         con.execute("UPDATE sched_shifts SET day=?,emp_id=?,area=?,start_min=?,end_min=?,note=? WHERE id=?",
@@ -1296,7 +1348,7 @@ def api_sched_shift():
 
 @app.route("/api/sched/shift/<int:sid>", methods=["DELETE"])
 def api_sched_del(sid):
-    require_admin()
+    require_owner()
     con = db()
     con.execute("DELETE FROM sched_shifts WHERE id=?", (sid,))
     audit(con, "admin", "sched_del", str(sid)); con.commit()
@@ -1305,7 +1357,7 @@ def api_sched_del(sid):
 @app.route("/api/sched/copy", methods=["POST"])
 def api_sched_copy():
     """Copy the previous week's shifts onto the target week (replaces it), matched by weekday."""
-    require_admin()
+    require_owner()
     con = db()
     d = request.get_json(force=True, silent=True) or {}
     dest = str(d.get("week", "")).strip() or this_week_key()
@@ -1326,11 +1378,81 @@ def api_sched_copy():
     audit(con, "admin", "sched_copy", f"{src}->{dest} {n}"); con.commit()
     return jsonify({"ok": True, "copied": n})
 
+@app.route("/api/sched/copyday", methods=["POST"])
+def api_sched_copyday():
+    """Copy the previous day's shifts onto a day (replaces that day)."""
+    require_owner()
+    con = db()
+    d = request.get_json(force=True, silent=True) or {}
+    day = str(d.get("day", "")).strip()
+    if not day:
+        return jsonify({"ok": False, "error": "No day."}), 400
+    prev = (date(*[int(x) for x in day.split("-")]) - timedelta(days=1)).strftime("%Y-%m-%d")
+    rows = con.execute("SELECT * FROM sched_shifts WHERE day=? ORDER BY start_min", (prev,)).fetchall()
+    con.execute("DELETE FROM sched_shifts WHERE day=?", (day,))
+    n = 0
+    for r in rows:
+        con.execute("""INSERT INTO sched_shifts(day,emp_id,area,start_min,end_min,note,created_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (day, r["emp_id"], r["area"], r["start_min"], r["end_min"], r["note"], int(time.time())))
+        n += 1
+    audit(con, "admin", "sched_copyday", f"{prev}->{day} {n}"); con.commit()
+    return jsonify({"ok": True, "copied": n})
+
+@app.route("/api/sched/email", methods=["POST"])
+def api_sched_email():
+    """Email each employee (with an address) their shifts + total hours for the week."""
+    require_owner()
+    con = db()
+    d = request.get_json(force=True, silent=True) or {}
+    wk = str(d.get("week", "")).strip() or this_week_key()
+    days = _week_days(wk)
+    d0 = date(*[int(x) for x in days[0].split("-")]); d6 = date(*[int(x) for x in days[6].split("-")])
+    rng = f"{d0.strftime('%b %-d')} – {d6.strftime('%b %-d, %Y')}"
+    emps = {e["id"]: dict(e) for e in con.execute("SELECT id,name,email FROM employees").fetchall()}
+    by_emp = {}
+    for s in con.execute("SELECT * FROM sched_shifts WHERE day>=? AND day<=? ORDER BY day,start_min",
+                         (days[0], days[6])).fetchall():
+        by_emp.setdefault(s["emp_id"], []).append(s)
+    sent = 0; skipped = []
+    for eid, slist in by_emp.items():
+        e = emps.get(eid)
+        if not e:
+            continue
+        to = (e["email"] or "").strip()
+        if not to:
+            skipped.append(e["name"]); continue
+        rows_html = ""; total = 0.0; tl = []
+        for s in slist:
+            dd = date(*[int(x) for x in s["day"].split("-")]); dn = dd.strftime("%a %b %-d")
+            st = _min_to_hhmm12(s["start_min"]); en = _min_to_hhmm12(s["end_min"])
+            hrs = (s["end_min"] - s["start_min"]) / 60.0; total += hrs
+            rows_html += (f'<tr><td style="padding:7px 10px;border-bottom:1px solid #eee">{dn}</td>'
+                          f'<td style="padding:7px 10px;border-bottom:1px solid #eee">{s["area"]}</td>'
+                          f'<td style="padding:7px 10px;border-bottom:1px solid #eee;white-space:nowrap">{st} – {en}</td>'
+                          f'<td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right">{hrs:.1f}h</td></tr>')
+            tl.append(f"{dn}: {s['area']} {st}-{en} ({hrs:.1f}h)")
+        inner = (f'<p style="font:14px Arial;color:#333">Hi {e["name"].split()[0]}, here is your schedule for <b>{rng}</b>:</p>'
+                 f'<table style="border-collapse:collapse;width:100%;font:13px Arial;color:#222;border:1px solid #e5e7eb">'
+                 f'<thead><tr style="background:#1a1206;color:#fff"><th style="padding:8px 10px;text-align:left">Day</th>'
+                 f'<th style="padding:8px 10px;text-align:left">Area</th><th style="padding:8px 10px;text-align:left">Time</th>'
+                 f'<th style="padding:8px 10px;text-align:right">Hours</th></tr></thead><tbody>{rows_html}</tbody>'
+                 f'<tfoot><tr><td colspan="3" style="padding:8px 10px;font-weight:bold">Total</td>'
+                 f'<td style="padding:8px 10px;text-align:right;font-weight:bold">{total:.1f}h</td></tr></tfoot></table>'
+                 f'<p style="font:12px Arial;color:#888;margin-top:12px">Times may change — check with a manager if anything looks off.</p>')
+        text = f"Your schedule for {rng}:\n" + "\n".join(tl) + f"\nTotal: {total:.1f}h"
+        try:
+            _send(con, to, f"Your schedule — {rng}", inner, text, tag="schedule"); sent += 1
+        except Exception:
+            skipped.append(e["name"] + " (send failed)")
+    audit(con, "admin", "sched_email", f"{wk} sent {sent}"); con.commit()
+    return jsonify({"ok": True, "sent": sent, "skipped": skipped})
+
 @app.route("/api/inv/unlock", methods=["POST"])
 def inv_unlock():
     con = db()
     pw = str((request.get_json(force=True, silent=True) or {}).get("password", "")).strip()
-    if not (valid_owner_cookie(con) or _inv_pw_ok(con, pw)):   # owner is already authenticated
+    if not (is_staff(con) or _inv_pw_ok(con, pw)):   # owner/manager already authenticated
         return jsonify({"ok": False, "error": "Wrong inventory password."}), 403
     items = [dict(r) for r in con.execute(
         "SELECT code,name,cat,unit,vendor,ims,rd,price,par,active FROM inv_items ORDER BY sort_order").fetchall()]

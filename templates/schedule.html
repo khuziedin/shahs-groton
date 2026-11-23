@@ -36,7 +36,8 @@
   .covrow{display:flex;align-items:center;gap:9px;margin:5px 0}
   .covrow .lbl{width:58px;flex:0 0 auto;font-size:12px;font-weight:700;color:#c9bdac}
   .track{position:relative;flex:1;height:16px;border-radius:8px;background:#2a2017;overflow:hidden}
-  .seg{position:absolute;top:0;bottom:0;border-radius:7px}
+  .seg{position:absolute;top:0;bottom:0;border-radius:7px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .seg .cnt{font:800 10px -apple-system,Arial;color:#14110e;line-height:1}
   .ticks{display:flex;justify-content:space-between;margin:3px 0 0 67px;font-size:10px;color:#6f655a}
   .gaptxt{font-size:11.5px;color:#f0a35e;margin:2px 0 0 67px}
   .oktxt{font-size:11.5px;color:#58c27d;margin:2px 0 0 67px}
@@ -46,9 +47,21 @@
   .shift .nm{flex:1;min-width:0;font-size:15px;font-weight:650}
   .shift .tm{font-size:12.5px;color:#9a8f80;white-space:nowrap}
   .shift .ar{font-size:11px;color:#c9bdac;font-weight:600}
-  .addbtn{margin-top:10px;width:100%;border:1px dashed #4a3f30;background:transparent;color:#c9a35e;border-radius:12px;padding:11px;font-weight:650;font-size:14px;cursor:pointer}
+  .topacts{display:flex;gap:10px;margin-bottom:2px}
+  .topacts .btn{flex:1;text-align:center;font-size:13px;padding:12px 6px}
+  .dayacts{display:flex;gap:8px;margin-top:10px}
+  .addbtn{flex:1;border:1px dashed #4a3f30;background:transparent;color:#c9a35e;border-radius:12px;padding:11px;font-weight:650;font-size:14px;cursor:pointer}
   .addbtn:active{background:#201b12}
+  .cpbtn{flex:0 0 auto;border:1px solid #3a3022;background:#1a160f;color:#c9a35e;border-radius:12px;padding:11px 13px;font-weight:650;font-size:13px;cursor:pointer}
+  .cpbtn:active{background:#221c14}
   .none{color:#8a8072;font-size:13.5px;padding:2px 0 2px}
+  .closemark{position:absolute;top:-2px;bottom:-2px;width:2px;background:rgba(255,255,255,.4);border-radius:2px}
+  .day.summary{border-color:#3a5230;box-shadow:0 0 0 1px #3a5230 inset}
+  .sumrow{display:flex;justify-content:space-between;align-items:center;padding:9px 2px;border-bottom:1px solid #241f18}
+  .sumrow:last-of-type{border-bottom:0}
+  .sumrow .nm{font-size:15.5px;font-weight:650}
+  .sumrow .mt{color:#9a8f80;font-size:13.5px}
+  .arealine{margin-top:12px;font-size:12.5px;color:#9a8f80;display:flex;gap:10px;flex-wrap:wrap}
   /* bottom sheet */
   .ov{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:80;display:none;align-items:flex-end}
   .ov.show{display:flex}
@@ -61,6 +74,7 @@
   .fld select,.fld input{width:100%;padding:13px;font-size:16px;border-radius:12px;border:1px solid #3a342c;background:#211c16;color:#fff;outline:none}
   .fld select:focus,.fld input:focus{border-color:#b06d10}
   .two{display:flex;gap:10px}.two .fld{flex:1}
+  .hint{font-size:11.5px;color:#8a8072;margin:-4px 0 12px;line-height:1.4}
   .srow{display:flex;gap:10px;margin-top:6px}.srow .btn{flex:1;text-align:center;padding:14px}
   .del{color:#ff9a8a;border-color:#5a2b24}
   .toast{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);background:#2a241d;color:#f4efe7;

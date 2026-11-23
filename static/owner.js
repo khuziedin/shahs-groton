@@ -105,9 +105,10 @@
     // Quick links
     html+='<div class="card"><h2>Open</h2><div class="links">'+
       '<a href="/schedule">Schedule</a>'+
+      '<a href="/kiosk">Clock in / out</a>'+
       '<a href="/admin">Manager console</a>'+
-      '<a href="/admin#reports">Reports &amp; payroll</a>'+
       '<a href="/inventory">Inventory</a>'+
+      '<a href="/admin#reports">Reports &amp; payroll</a>'+
       '<a href="/admin#photos">All photos</a>'+
       '</div></div>';
 
