@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Schedule — Shah's Halal</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#14110e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Schedule">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:#14110e;color:#f4efe7;
+    font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-text-size-adjust:100%}
+  .top{position:sticky;top:0;z-index:5;background:#14110e;border-bottom:1px solid #2a241d;padding:14px 16px 10px}
+  .top .ttl{font-size:20px;font-weight:800;line-height:1}
+  .top .sub{font-size:12px;color:#b06d10;font-weight:600;margin-top:2px}
+  .weeknav{display:flex;align-items:center;gap:10px;margin-top:12px}
+  .weeknav button{width:40px;height:38px;border:1px solid #332c24;background:#1f1a14;color:#f4efe7;border-radius:11px;font-size:17px;cursor:pointer}
+  .weeknav .rng{flex:1;text-align:center;font-weight:700;font-size:14.5px}
+  .weeknav button:active{opacity:.7}
+  .wrap{padding:12px 14px 30px;max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+  .actions{display:flex;gap:10px}
+  .btn{border:1px solid #352e25;background:#201b15;color:#f4efe7;border-radius:12px;padding:11px 14px;font-weight:650;font-size:14px;cursor:pointer}
+  .btn.primary{background:#b06d10;border-color:#b06d10;color:#fff}
+  .btn.block{width:100%;display:block;text-align:center}
+  .btn:active{opacity:.8}
+  .day{background:#1c1811;border:1px solid #2a241d;border-radius:18px;padding:14px}
+  .day.today{border-color:#6a5a2a;box-shadow:0 0 0 1px #6a5a2a inset}
+  .dhead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px}
+  .dhead .d{font-size:16px;font-weight:800}
+  .dhead .tot{font-size:12.5px;color:#9a8f80}
+  .cov{margin:4px 0 12px}
+  .covrow{display:flex;align-items:center;gap:9px;margin:5px 0}
+  .covrow .lbl{width:58px;flex:0 0 auto;font-size:12px;font-weight:700;color:#c9bdac}
+  .track{position:relative;flex:1;height:16px;border-radius:8px;background:#2a2017;overflow:hidden}
+  .seg{position:absolute;top:0;bottom:0;border-radius:7px}
+  .ticks{display:flex;justify-content:space-between;margin:3px 0 0 67px;font-size:10px;color:#6f655a}
+  .gaptxt{font-size:11.5px;color:#f0a35e;margin:2px 0 0 67px}
+  .oktxt{font-size:11.5px;color:#58c27d;margin:2px 0 0 67px}
+  .shift{display:flex;align-items:center;gap:10px;padding:9px 10px;border:1px solid #2a241d;border-radius:12px;margin-top:8px;cursor:pointer;background:#1a160f}
+  .shift:active{background:#221c14}
+  .dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+  .shift .nm{flex:1;min-width:0;font-size:15px;font-weight:650}
+  .shift .tm{font-size:12.5px;color:#9a8f80;white-space:nowrap}
+  .shift .ar{font-size:11px;color:#c9bdac;font-weight:600}
+  .addbtn{margin-top:10px;width:100%;border:1px dashed #4a3f30;background:transparent;color:#c9a35e;border-radius:12px;padding:11px;font-weight:650;font-size:14px;cursor:pointer}
+  .addbtn:active{background:#201b12}
+  .none{color:#8a8072;font-size:13.5px;padding:2px 0 2px}
+  /* bottom sheet */
+  .ov{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:80;display:none;align-items:flex-end}
+  .ov.show{display:flex}
+  .sheet{width:100%;max-width:720px;margin:0 auto;background:#1c1811;border:1px solid #2a241d;border-bottom:0;
+    border-radius:20px 20px 0 0;padding:18px 16px calc(20px + env(safe-area-inset-bottom));animation:up .2s ease}
+  @keyframes up{from{transform:translateY(30px);opacity:.6}to{transform:none;opacity:1}}
+  .sheet h3{margin:0 0 14px;font-size:17px}
+  .fld{margin-bottom:12px}
+  .fld label{display:block;font-size:12px;color:#9a8f80;margin-bottom:5px;font-weight:600}
+  .fld select,.fld input{width:100%;padding:13px;font-size:16px;border-radius:12px;border:1px solid #3a342c;background:#211c16;color:#fff;outline:none}
+  .fld select:focus,.fld input:focus{border-color:#b06d10}
+  .two{display:flex;gap:10px}.two .fld{flex:1}
+  .srow{display:flex;gap:10px;margin-top:6px}.srow .btn{flex:1;text-align:center;padding:14px}
+  .del{color:#ff9a8a;border-color:#5a2b24}
+  .toast{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);background:#2a241d;color:#f4efe7;
+    padding:10px 16px;border-radius:999px;font-size:13.5px;opacity:0;transition:opacity .2s;z-index:90;pointer-events:none;border:1px solid #3a342c}
+  .toast.show{opacity:1}
+  .loading{color:#9a8f80;text-align:center;padding:48px 0}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="ttl">Schedule</div>
+  <div class="sub" id="store">Shah's Halal — Groton</div>
+  <div class="weeknav">
+    <button id="prev" aria-label="Previous week">‹</button>
+    <div class="rng" id="range">—</div>
+    <button id="next" aria-label="Next week">›</button>
+  </div>
+</header>
+<div class="wrap" id="root"><div class="loading">Loading…</div></div>
+<div class="ov" id="ov"></div>
+<div class="toast" id="toast"></div>
+<script src="/static/schedule.js"></script>
+<script src="/static/nav.js"></script>
+</body>
+</html>

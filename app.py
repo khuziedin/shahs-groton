@@ -91,6 +91,9 @@ DEFAULT_SETTINGS = {
     "inv_password": "1234",      # staff enter this to open the Inventory counter (change in Settings)
     "inv_deadline": "Sunday",    # order deadline shown on the count screen
     "inv_order_to": "",          # where finished orders email to (blank = owner report_email)
+    "sched_areas": "Kitchen,Front",  # scheduling areas (comma-separated); editable later
+    "sched_open": "10:00",       # schedule coverage timeline start
+    "sched_close": "23:00",      # schedule coverage timeline end
 }
 
 # Generic samples, only used to seed a brand-new install so it isn't empty.
@@ -183,6 +186,16 @@ def init_db():
         code TEXT,
         on_hand REAL,
         order_qty REAL
+    );
+    CREATE TABLE IF NOT EXISTS sched_shifts(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        day TEXT NOT NULL,                -- 'YYYY-MM-DD'
+        emp_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,
+        area TEXT DEFAULT 'Kitchen',
+        start_min INTEGER NOT NULL,       -- minutes from midnight
+        end_min INTEGER NOT NULL,
+        note TEXT DEFAULT '',
+        created_at INTEGER
     );
     """)
     # migrations for databases created by an earlier version
@@ -1216,6 +1229,102 @@ def inv_order_html(con, computed, counted_by, comment, ncount):
 @app.route("/inventory")
 def inventory_page():
     return render_template("inventory.html")
+
+# ----------------------------------------------------------------------------
+# SCHEDULE (shift planner + Kitchen/Front coverage)
+# ----------------------------------------------------------------------------
+def _hhmm_to_min(s):
+    try:
+        h, m = str(s).split(":"); return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+def _week_days(week_key_str):
+    y, mo, da = [int(x) for x in week_key_str.split("-")]
+    start = date(y, mo, da)
+    return [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+
+@app.route("/schedule")
+def schedule_page():
+    return render_template("schedule.html")
+
+@app.route("/api/sched")
+def api_sched():
+    require_admin()
+    con = db()
+    wk = request.args.get("week") or this_week_key()
+    days = _week_days(wk)
+    emps = [{"id": e["id"], "name": e["name"], "rate": e["rate"]}
+            for e in con.execute("SELECT id,name,rate FROM employees WHERE active=1 ORDER BY sort_order,name").fetchall()]
+    allnames = {r["id"]: r["name"] for r in con.execute("SELECT id,name FROM employees").fetchall()}
+    shifts = []
+    for r in con.execute("""SELECT id,day,emp_id,area,start_min,end_min,note FROM sched_shifts
+                            WHERE day>=? AND day<=? ORDER BY start_min""", (days[0], days[6])).fetchall():
+        s = dict(r); s["name"] = allnames.get(s["emp_id"], "—"); shifts.append(s)
+    areas = [a.strip() for a in get_setting(con, "sched_areas", "Kitchen,Front").split(",") if a.strip()]
+    return jsonify({
+        "week": wk, "days": days, "employees": emps, "shifts": shifts, "areas": areas,
+        "open": get_setting(con, "sched_open", "10:00"),
+        "close": get_setting(con, "sched_close", "23:00"),
+        "store": get_setting(con, "store_name"),
+    })
+
+@app.route("/api/sched/shift", methods=["POST"])
+def api_sched_shift():
+    require_admin()
+    con = db()
+    d = request.get_json(force=True, silent=True) or {}
+    day = str(d.get("day", "")).strip()
+    emp_id = d.get("emp_id")
+    area = (str(d.get("area", "Kitchen")).strip() or "Kitchen")
+    sm = _hhmm_to_min(d.get("start")); em = _hhmm_to_min(d.get("end"))
+    note = str(d.get("note", ""))[:120]
+    if not day or not emp_id or sm is None or em is None:
+        return jsonify({"ok": False, "error": "Pick a person, area, and times."}), 400
+    if em <= sm:
+        return jsonify({"ok": False, "error": "End time must be after start time."}), 400
+    sid = d.get("id")
+    if sid:
+        con.execute("UPDATE sched_shifts SET day=?,emp_id=?,area=?,start_min=?,end_min=?,note=? WHERE id=?",
+                    (day, emp_id, area, sm, em, note, sid))
+    else:
+        con.execute("""INSERT INTO sched_shifts(day,emp_id,area,start_min,end_min,note,created_at)
+                       VALUES(?,?,?,?,?,?,?)""", (day, emp_id, area, sm, em, note, int(time.time())))
+    audit(con, "admin", "sched_shift", f"{day} emp{emp_id} {area}")
+    con.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/sched/shift/<int:sid>", methods=["DELETE"])
+def api_sched_del(sid):
+    require_admin()
+    con = db()
+    con.execute("DELETE FROM sched_shifts WHERE id=?", (sid,))
+    audit(con, "admin", "sched_del", str(sid)); con.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/sched/copy", methods=["POST"])
+def api_sched_copy():
+    """Copy the previous week's shifts onto the target week (replaces it), matched by weekday."""
+    require_admin()
+    con = db()
+    d = request.get_json(force=True, silent=True) or {}
+    dest = str(d.get("week", "")).strip() or this_week_key()
+    src = shift_add_days(dest, -7)
+    src_days = _week_days(src); dest_days = _week_days(dest)
+    rows = con.execute("SELECT * FROM sched_shifts WHERE day>=? AND day<=?",
+                       (src_days[0], src_days[6])).fetchall()
+    con.execute("DELETE FROM sched_shifts WHERE day>=? AND day<=?", (dest_days[0], dest_days[6]))
+    n = 0
+    for r in rows:
+        if r["day"] not in src_days:
+            continue
+        idx = src_days.index(r["day"])
+        con.execute("""INSERT INTO sched_shifts(day,emp_id,area,start_min,end_min,note,created_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (dest_days[idx], r["emp_id"], r["area"], r["start_min"], r["end_min"], r["note"], int(time.time())))
+        n += 1
+    audit(con, "admin", "sched_copy", f"{src}->{dest} {n}"); con.commit()
+    return jsonify({"ok": True, "copied": n})
 
 @app.route("/api/inv/unlock", methods=["POST"])
 def inv_unlock():

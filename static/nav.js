@@ -2,7 +2,8 @@
 (function () {
   var items = [
     { href: "/owner",     label: "Home",      icon: "⌂" },
-    { href: "/inventory", label: "Inventory", icon: "▦" },
+    { href: "/schedule",  label: "Schedule",  icon: "▦" },
+    { href: "/inventory", label: "Inventory", icon: "▤" },
     { href: "/admin",     label: "Console",   icon: "⚙" }
   ];
   var path = location.pathname.replace(/\/$/, "") || "/";
