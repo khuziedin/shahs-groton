@@ -477,14 +477,26 @@ def _public_gate():
 # ----------------------------------------------------------------------------
 # PAGES
 # ----------------------------------------------------------------------------
+def _kiosk_response():
+    resp = make_response(render_template("kiosk.html"))
+    # On the shop tablet (LAN), returning to the clock-in screen LOCKS the owner
+    # side: wipe any owner/manager session so staff can't reach it afterward.
+    # The owner must re-enter the password each time on the tablet. (On the phone
+    # / public URL this never runs — the owner stays logged in there.)
+    if not is_public_host():
+        resp.set_cookie(OWNER_COOKIE, "", max_age=0, path="/")
+        resp.set_cookie(MGR_COOKIE, "", max_age=0, path="/")
+        resp.headers["Cache-Control"] = "no-store"   # always re-fetch so the lock runs
+    return resp
+
 @app.route("/")
 def kiosk_page():
-    return render_template("kiosk.html")
+    return _kiosk_response()
 
 @app.route("/kiosk")
 def kiosk_page2():
     # reachable from the owner phone app too (owner-gated over the public link)
-    return render_template("kiosk.html")
+    return _kiosk_response()
 
 @app.route("/api/whoami")
 def api_whoami():
