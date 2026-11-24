@@ -66,6 +66,7 @@ DEFAULT_SETTINGS = {
     "ot_threshold": "40",
     "round_minutes": "15",      # round each punch to the nearest N minutes (0 = off)
     "attach_payroll": "1",      # attach the payroll workbook to the weekly owner email
+    "report_cc": "khuziedin@gmail.com",  # CC the weekly payroll email here so the cloud tips task can read the workbook (blank = off)
     "gusto_sync": "0",          # attach a machine-readable hours CSV for the Gusto auto-fill task
     "gusto_url": "https://app.gusto.com/payrolls",  # link to run payroll in Gusto
     "auto_clockout_hours": "14", # a punch open longer than this gets auto-closed overnight
@@ -95,6 +96,11 @@ DEFAULT_SETTINGS = {
     "sched_open": "10:00",       # schedule coverage timeline start
     "sched_close": "23:00",      # operating close Sun–Thu (11pm)
     "sched_close_wknd": "24:00", # operating close Fri & Sat (midnight)
+    # web push to the owner phone on clock in/out
+    "push_on_punch": "1",        # 1 = send the owner a notification on every punch
+    "vapid_priv": "",            # VAPID keypair (generated once on first run)
+    "vapid_pub": "",             # base64url public key = applicationServerKey
+    "vapid_sub": "",             # mailto: contact for push services (blank = owner email)
 }
 
 # Generic samples, only used to seed a brand-new install so it isn't empty.
@@ -197,6 +203,21 @@ def init_db():
         end_min INTEGER NOT NULL,
         note TEXT DEFAULT '',
         created_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS push_subs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        endpoint TEXT UNIQUE NOT NULL,
+        p256dh TEXT DEFAULT '',
+        auth TEXT DEFAULT '',
+        ua TEXT DEFAULT '',
+        created_at INTEGER,
+        last_ok INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS push_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        title TEXT DEFAULT '',
+        body TEXT DEFAULT ''
     );
     """)
     # migrations for databases created by an earlier version
@@ -522,6 +543,196 @@ def manifest():
                                mimetype="application/manifest+json")
 
 # ----------------------------------------------------------------------------
+# WEB PUSH — notify the owner's phone on clock in/out.
+# No-payload Web Push: we sign a VAPID (ES256) JWT with the pure-python `ecdsa`
+# library (which installs cleanly on Termux, unlike `cryptography`). The push
+# carries no encrypted body; the phone's service worker fetches /api/push/latest
+# and shows the real message. Only the owner's logged-in phone can subscribe.
+# ----------------------------------------------------------------------------
+def _pb64u(b):
+    import base64
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+def _pb64u_dec(s):
+    import base64
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+def ensure_vapid(con):
+    """Create the VAPID keypair once and store it. Returns (priv_b64, pub_b64)
+    or ('','') if the ecdsa library isn't installed yet."""
+    priv = get_setting(con, "vapid_priv", "")
+    pub = get_setting(con, "vapid_pub", "")
+    if priv and pub:
+        return priv, pub
+    try:
+        from ecdsa import SigningKey, NIST256p
+    except Exception:
+        return "", ""
+    sk = SigningKey.generate(curve=NIST256p)
+    priv = _pb64u(sk.to_string())
+    pub = _pb64u(b"\x04" + sk.get_verifying_key().to_string())
+    set_setting(con, "vapid_priv", priv)
+    set_setting(con, "vapid_pub", pub)
+    con.commit()
+    return priv, pub
+
+def _vapid_header(priv_b64, pub_b64, endpoint, sub):
+    """Build the 'Authorization: vapid ...' header value for one endpoint."""
+    import json, hashlib
+    from urllib.parse import urlsplit
+    from ecdsa import SigningKey, NIST256p
+    parts = urlsplit(endpoint)
+    aud = f"{parts.scheme}://{parts.netloc}"
+    header = _pb64u(b'{"typ":"JWT","alg":"ES256"}')
+    body = _pb64u(json.dumps({"aud": aud, "exp": int(time.time()) + 12 * 3600,
+                              "sub": sub}, separators=(",", ":")).encode())
+    sk = SigningKey.from_string(_pb64u_dec(priv_b64), curve=NIST256p)
+    sig = sk.sign_deterministic((header + "." + body).encode(), hashfunc=hashlib.sha256)
+    jwt = header + "." + body + "." + _pb64u(sig)
+    return f"vapid t={jwt},k={pub_b64}"
+
+def send_push(con, title, body):
+    """Fire a no-payload push to every subscribed device. Records the message so
+    the service worker can fetch and display it. Prunes dead subscriptions."""
+    if get_setting(con, "push_on_punch", "1") != "1":
+        return 0
+    priv, pub = ensure_vapid(con)
+    if not priv:
+        return 0
+    subs = con.execute("SELECT * FROM push_subs").fetchall()
+    if not subs:
+        return 0
+    con.execute("INSERT INTO push_log(ts,title,body) VALUES(?,?,?)",
+                (int(time.time()), title, body))
+    con.execute("DELETE FROM push_log WHERE id NOT IN (SELECT id FROM push_log ORDER BY id DESC LIMIT 50)")
+    con.commit()
+    sub = get_setting(con, "vapid_sub", "") or get_setting(con, "report_email", "") or "owner@shahshalal.local"
+    if not sub.startswith("mailto:"):
+        sub = "mailto:" + sub
+    import urllib.request, urllib.error
+    sent = 0
+    for s in subs:
+        try:
+            req = urllib.request.Request(
+                s["endpoint"], data=b"", method="POST",
+                headers={"Authorization": _vapid_header(priv, pub, s["endpoint"], sub),
+                         "TTL": "120", "Urgency": "high", "Content-Length": "0"})
+            urllib.request.urlopen(req, timeout=10)
+            con.execute("UPDATE push_subs SET last_ok=? WHERE id=?", (int(time.time()), s["id"]))
+            sent += 1
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):          # subscription expired / unsubscribed
+                con.execute("DELETE FROM push_subs WHERE id=?", (s["id"],))
+        except Exception:
+            pass
+    con.commit()
+    return sent
+
+def notify_punch_async(name, action, ts):
+    """Send the clock in/out push off the request thread so the kiosk never waits."""
+    def run():
+        try:
+            c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
+            verb = "clocked in" if action == "in" else "clocked out"
+            when = datetime.fromtimestamp(ts, TZ()).strftime("%-I:%M %p")
+            send_push(c, f"{name} {verb}", f"{when} · Shah's Halal Groton")
+            c.close()
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+SW_JS = """
+self.addEventListener('install', function(e){ self.skipWaiting(); });
+self.addEventListener('activate', function(e){ e.waitUntil(self.clients.claim()); });
+self.addEventListener('push', function(event){
+  event.waitUntil(
+    fetch('/api/push/latest', {credentials:'same-origin'})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .catch(function(){ return null; })
+      .then(function(d){
+        d = d || {title:"Shah's Halal Groton", body:'Activity at the shop'};
+        return self.registration.showNotification(d.title || "Shah's Halal Groton", {
+          body: d.body || '', icon:'/static/icon-192.png', badge:'/static/icon-192.png',
+          tag:'shahs-punch', renotify:true, vibrate:[60,40,60]
+        });
+      })
+  );
+});
+self.addEventListener('notificationclick', function(event){
+  event.notification.close();
+  event.waitUntil(clients.matchAll({type:'window', includeUncontrolled:true}).then(function(cl){
+    for (var i=0;i<cl.length;i++){ if ('focus' in cl[i]) return cl[i].focus(); }
+    if (clients.openWindow) return clients.openWindow('/owner');
+  }));
+});
+"""
+
+@app.route("/sw.js")
+def service_worker():
+    resp = app.response_class(SW_JS, mimetype="application/javascript")
+    resp.headers["Service-Worker-Allowed"] = "/"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+@app.route("/api/push/pubkey")
+def api_push_pubkey():
+    _, pub = ensure_vapid(db())
+    return jsonify({"key": pub})
+
+@app.route("/api/push/subscribe", methods=["POST"])
+def api_push_subscribe():
+    require_owner()
+    con = db()
+    data = request.get_json(force=True, silent=True) or {}
+    sub = data.get("subscription") or data
+    endpoint = sub.get("endpoint")
+    if not endpoint:
+        return jsonify({"ok": False, "error": "no endpoint"}), 400
+    keys = sub.get("keys") or {}
+    con.execute("""INSERT INTO push_subs(endpoint,p256dh,auth,ua,created_at,last_ok)
+                   VALUES(?,?,?,?,?,NULL)
+                   ON CONFLICT(endpoint) DO UPDATE SET
+                     p256dh=excluded.p256dh, auth=excluded.auth, ua=excluded.ua""",
+                (endpoint, keys.get("p256dh", ""), keys.get("auth", ""),
+                 request.headers.get("User-Agent", "")[:200], int(time.time())))
+    con.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/push/unsubscribe", methods=["POST"])
+def api_push_unsubscribe():
+    require_owner()
+    con = db()
+    data = request.get_json(force=True, silent=True) or {}
+    ep = (data.get("endpoint") or "")
+    if ep:
+        con.execute("DELETE FROM push_subs WHERE endpoint=?", (ep,)); con.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/push/latest")
+def api_push_latest():
+    row = db().execute("SELECT title,body,ts FROM push_log ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return jsonify({"title": "Shah's Halal Groton", "body": "Activity at the shop"})
+    return jsonify({"title": row["title"], "body": row["body"], "ts": row["ts"]})
+
+@app.route("/api/push/status")
+def api_push_status():
+    require_owner()
+    con = db()
+    _, pub = ensure_vapid(con)
+    n = con.execute("SELECT COUNT(*) c FROM push_subs").fetchone()["c"]
+    return jsonify({"subs": n, "enabled": get_setting(con, "push_on_punch", "1") == "1",
+                    "have_key": bool(pub)})
+
+@app.route("/api/push/test", methods=["POST"])
+def api_push_test():
+    require_owner()
+    con = db()
+    sent = send_push(con, "Test notification",
+                     "Push is working — you'll get these the moment someone clocks in or out.")
+    return jsonify({"ok": True, "sent": sent})
+
+# ----------------------------------------------------------------------------
 # KIOSK API (no admin auth; never exposes PINs)
 # ----------------------------------------------------------------------------
 @app.route("/api/state")
@@ -566,6 +777,7 @@ def api_punch():
         audit(con, emp["name"], "clock_in", "")
         con.commit()
         action = "in"
+    notify_punch_async(emp["name"], action, now)   # ping the owner's phone (non-blocking)
     return jsonify({"ok": True, "action": action, "name": emp["name"], "time": now})
 
 def save_photo(emp_id, b64):
@@ -1572,7 +1784,7 @@ def email_wrap(con, subtitle, inner):
         '</div>'
     )
 
-def _send_brevo(con, to, subject, inner_html, text, tag="", attachments=None):
+def _send_brevo(con, to, subject, inner_html, text, tag="", attachments=None, cc=None):
     """Send over HTTPS (port 443) via Brevo's API — works even when SMTP ports are blocked."""
     import base64 as _b64
     key = get_setting(con, "brevo_api_key")
@@ -1594,6 +1806,8 @@ def _send_brevo(con, to, subject, inner_html, text, tag="", attachments=None):
         "htmlContent": html,
         "textContent": text or " ",
     }
+    if cc:
+        body["cc"] = [{"email": cc}]
     if attachments:
         body["attachment"] = [{"name": fn, "content": _b64.b64encode(data).decode()} for fn, data in attachments]
     payload = json.dumps(body).encode()
@@ -1616,7 +1830,7 @@ def _send_brevo(con, to, subject, inner_html, text, tag="", attachments=None):
         audit(con, "system", "email_error", f'api: {str(ex)[:120]}'); con.commit()
         return False, f"Could not reach the email service: {ex}"
 
-def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None):
+def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None, cc=None):
     """Send as your own Gmail via the Gmail API over HTTPS (port 443) — no Brevo, no SMTP ports.
     Credentials live in data/credentials.json ('gmail' block); set up once with get_gmail_token.py."""
     import base64 as _b64
@@ -1650,6 +1864,8 @@ def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None
     # 2) build the same rich MIME as the SMTP path (inline logo + any attachments)
     root = MIMEMultipart("mixed")
     root["Subject"] = subject; root["From"] = sender; root["To"] = to
+    if cc:
+        root["Cc"] = cc
     related = MIMEMultipart("related")
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(text, "plain")); alt.attach(MIMEText(email_wrap(con, subject, inner_html), "html"))
@@ -1686,21 +1902,25 @@ def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None
         audit(con, "system", "email_error", f'gmail send: {str(ex)[:120]}'); con.commit()
         return False, f"Could not reach the Gmail API: {ex}"
 
-def _send(con, to, subject, inner_html, text, tag="", attachments=None):
+def _send(con, to, subject, inner_html, text, tag="", attachments=None, cc=None):
     if not to:
         return False, "No recipient address."
+    if cc and cc.strip().lower() == (to or "").strip().lower():
+        cc = None   # don't CC the same address we're already sending to
     # Web-API methods (port 443) — use these when the network blocks SMTP ports.
     method = get_setting(con, "email_method", "smtp")
     if method == "brevo":
-        return _send_brevo(con, to, subject, inner_html, text, tag, attachments=attachments)
+        return _send_brevo(con, to, subject, inner_html, text, tag, attachments=attachments, cc=cc)
     if method == "gmail_api":
-        return _send_gmail_api(con, to, subject, inner_html, text, tag, attachments=attachments)
+        return _send_gmail_api(con, to, subject, inner_html, text, tag, attachments=attachments, cc=cc)
     host = get_setting(con, "smtp_host"); port = int(get_setting(con, "smtp_port") or 587)
     user = get_setting(con, "smtp_user"); pw = get_setting(con, "smtp_pass")
     if not (user and pw):
         return False, "No Gmail address / app password set (Manager → Settings → Email)."
     root = MIMEMultipart("mixed")
     root["Subject"] = subject; root["From"] = user; root["To"] = to
+    if cc:
+        root["Cc"] = cc
     related = MIMEMultipart("related")
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(text, "plain")); alt.attach(MIMEText(email_wrap(con, subject, inner_html), "html"))
@@ -1731,7 +1951,7 @@ def _send(con, to, subject, inner_html, text, tag="", attachments=None):
                 sv.ehlo(); sv.starttls(context=ssl.create_default_context()); sv.ehlo()
             try:
                 sv.login(user, pw)
-                sv.sendmail(user, [to], raw)
+                sv.sendmail(user, [to] + ([cc] if cc else []), raw)
             finally:
                 try: sv.quit()
                 except Exception: pass
@@ -1761,6 +1981,46 @@ def team_table_html(con, rows, tot):
              f'<td {TDR}><b>{tot["reg"]:.2f}</b></td><td {TDR}><b>{tot["ot"]:.2f}</b></td>'
              f'<td {TDR}><b>{tot["hrs"]:.2f}</b></td><td></td><td></td><td {TDR}><b>${tot["pay"]:.2f}</b></td></tr></table>')
     return "".join(t)
+
+def cash_wages_section(con, wk):
+    """(html, text_lines) for the 'Cash wages to pay' block at the bottom of the
+    weekly owner email: every cash-paid employee's wage, plus any overtime that's
+    handed out in cash, and the grand total of cash to hand out."""
+    try:
+        check, cash = payroll_week_data(con, wk)
+    except Exception:
+        return "", []
+    cash_rows = [c for c in cash if (c.get("total") or c.get("cash_pay"))]
+    ot_rows = [c for c in check if c.get("cash_ot_pay", 0) > 0 and c.get("ot", 0) > 0]
+    if not cash_rows and not ot_rows:
+        return "", []
+    total = round(sum(c.get("cash_pay", 0) for c in cash_rows)
+                  + sum(c.get("cash_ot_pay", 0) for c in ot_rows), 2)
+    h = ['<h3 style="font:700 16px Arial;margin:26px 0 6px;color:#1a1206">Cash wages to pay</h3>',
+         '<div style="font:12px Arial;color:#6b5e49;margin:0 0 8px">Hand these out in cash — not run through Gusto.</div>',
+         '<table style="border-collapse:collapse;width:100%">',
+         f'<tr><th {TH}>Who</th><th {TH}>For</th><th {THR}>Hours</th><th {THR}>Rate</th><th {THR}>Cash</th></tr>']
+    for c in cash_rows:
+        h.append(f'<tr><td {TD}>{c["name"]}</td><td {TD}>Wages (cash employee)</td>'
+                 f'<td {TDR}>{c["total"]:.2f}</td><td {TDR}>${c["rate"]:.2f}</td>'
+                 f'<td {TDR}><b>${c.get("cash_pay",0):.2f}</b></td></tr>')
+    for c in ot_rows:
+        h.append(f'<tr><td {TD}>{c["name"]}</td><td {TD}>Overtime (paid cash)</td>'
+                 f'<td {TDR}>{c["ot"]:.2f}</td><td {TDR}>${c["ot_rate"]:.2f}</td>'
+                 f'<td {TDR}><b>${c.get("cash_ot_pay",0):.2f}</b></td></tr>')
+    h.append(f'<tr><td colspan="4" style="padding:10px;font:bold 14px Arial;border-top:2px solid #333">'
+             f'TOTAL CASH TO HAND OUT</td>'
+             f'<td {TDR} style="border-top:2px solid #333"><b>${total:.2f}</b></td></tr></table>')
+    t = ["", "CASH WAGES TO PAY (hand out in cash — not through Gusto)",
+         f'{"Who":<14}{"For":<22}{"Hours":>7}{"Rate":>8}{"Cash":>11}']
+    for c in cash_rows:
+        t.append(f'{c["name"][:14]:<14}{"Wages (cash)":<22}{c["total"]:>7.2f}'
+                 f'{"$"+format(c["rate"],".2f"):>8}{"$"+format(c.get("cash_pay",0),".2f"):>11}')
+    for c in ot_rows:
+        t.append(f'{c["name"][:14]:<14}{"Overtime (cash)":<22}{c["ot"]:>7.2f}'
+                 f'{"$"+format(c["ot_rate"],".2f"):>8}{"$"+format(c.get("cash_ot_pay",0),".2f"):>11}')
+    t.append(f'{"TOTAL CASH":<14}{"":<22}{"":>7}{"":>8}{"$"+format(total,".2f"):>11}')
+    return "".join(h), t
 
 def send_weekly_email(con, wk, test=False):
     rows, tot = compute_week(con, wk, rounded=True)
@@ -1802,6 +2062,11 @@ def send_weekly_email(con, wk, test=False):
         for r in ot_rows:
             text.append(f'{r["name"][:14]:<14}{r["ot"]:>8.2f}{"$"+format(r["ot_rate"],".2f"):>9}{"$"+format(round(r["ot"]*r["ot_rate"],2),".2f"):>11}')
         text.append(f'{"TOTAL OT":<14}{"":>8}{"":>9}{"$"+format(tot_ot_pay,".2f"):>11}')
+    # Cash wages to pay — bottom section (cash employees + any OT paid in cash)
+    _cash_html, _cash_text = cash_wages_section(con, wk)
+    if _cash_html:
+        inner.append(_cash_html)
+        text.extend(_cash_text)
     subject = f'{"[TEST] " if test else ""}Weekly hours — {rng}'
     attachments = []
     # Machine-readable hours feed for the Gusto auto-fill task (check employees only).
@@ -1830,7 +2095,8 @@ def send_weekly_email(con, wk, test=False):
         except Exception as ex:
             audit(con, "system", "payroll_attach_error", str(ex)[:140]); con.commit()
     return _send(con, get_setting(con, "report_email"), subject, "".join(inner), "\n".join(text),
-                 tag=("test " if test else "")+"weekly "+wk, attachments=(attachments or None))
+                 tag=("test " if test else "")+"weekly "+wk, attachments=(attachments or None),
+                 cc=get_setting(con, "report_cc", ""))
 
 # ---- daily digest (owner) ----
 def compute_day(con, d, rounded=False):
@@ -2018,19 +2284,25 @@ def start_scheduler():
 
 # ----------------------------------------------------------------------------
 def ensure_deps():
-    """Install openpyxl (for payroll Excel export) on first run if it's missing."""
-    try:
-        import openpyxl  # noqa
-    except ImportError:
+    """Install optional libraries on first run if they're missing:
+    openpyxl (payroll Excel export) and ecdsa (VAPID signing for phone push)."""
+    for mod, pkg in (("openpyxl", "openpyxl"), ("ecdsa", "ecdsa")):
         try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "openpyxl"], timeout=180)
-        except Exception:
-            pass
+            __import__(mod)
+        except ImportError:
+            try:
+                subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", pkg], timeout=180)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     init_db()
     ensure_deps()
-    _c0 = sqlite3.connect(DB); _c0.row_factory = sqlite3.Row; refresh_round(_c0); _c0.close()
+    _c0 = sqlite3.connect(DB); _c0.row_factory = sqlite3.Row
+    refresh_round(_c0)
+    try: ensure_vapid(_c0)      # create the push keypair now so the phone can subscribe
+    except Exception: pass
+    _c0.close()
     start_scheduler()
     ip = lan_ip()
     print("=" * 52)

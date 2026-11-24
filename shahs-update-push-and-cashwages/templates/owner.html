@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Owner — Shah's Halal</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#14110e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Shah's Owner">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:#14110e;color:#f4efe7;
+    font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-text-size-adjust:100%}
+  .top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:12px;
+    padding:16px 16px 12px;background:linear-gradient(#14110e,#14110e 70%,rgba(20,17,14,0));backdrop-filter:blur(6px)}
+  .hi{flex:1;min-width:0}
+  .hi b{display:block;font-size:20px;font-weight:800;line-height:1.15}
+  .hi span{font-size:12.5px;color:#b06d10;font-weight:600}
+  .iconbtn{width:40px;height:40px;flex:0 0 auto;border:1px solid #332c24;background:#1f1a14;color:#f4efe7;
+    border-radius:12px;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .iconbtn:active{opacity:.7}
+  .wrap{padding:4px 14px 30px;max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+  .card{background:#1c1811;border:1px solid #2a241d;border-radius:18px;padding:16px}
+  .card h2{margin:0 0 12px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#b9ac99;font-weight:700;display:flex;align-items:center;gap:8px}
+  .live{width:8px;height:8px;border-radius:50%;background:#58c27d;box-shadow:0 0 0 4px rgba(88,194,125,.18);display:inline-block}
+  .hero{background:linear-gradient(145deg,#231d14,#1a1610);border:1px solid #39301f}
+  .person{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #261f17}
+  .person:last-child{border-bottom:0}
+  .person:first-of-type{padding-top:2px}
+  .av{width:44px;height:44px;border-radius:50%;flex:0 0 auto;object-fit:cover;background:#3a2f1e;
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;color:#f0d9a8;overflow:hidden}
+  .person .nm{flex:1;min-width:0;font-size:16.5px;font-weight:650}
+  .person .meta{font-size:12.5px;color:#9a8f80;text-align:right;line-height:1.3}
+  .tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .tile{background:#1c1811;border:1px solid #2a241d;border-radius:18px;padding:16px 15px}
+  .tile .n{font-size:27px;font-weight:850;line-height:1}
+  .tile .l{font-size:11.5px;color:#9a8f80;margin-top:7px;text-transform:uppercase;letter-spacing:.04em;font-weight:600}
+  .tile.green .n{color:#58c27d}
+  .tile.amber .n{color:#f0a35e}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid #241f18}
+  .row:last-child{border-bottom:0}
+  .row .nm{font-size:15.5px;font-weight:600}
+  .row .meta{font-size:13px;color:#9a8f80}
+  .chip{display:inline-block;font-size:10.5px;font-weight:800;padding:3px 9px;border-radius:999px;margin-left:8px;letter-spacing:.02em}
+  .chip.in{background:#13331f;color:#58c27d}
+  .chip.out{background:#33241a;color:#f0a35e}
+  .chip.ot{background:#3a2412;color:#f0a35e}
+  .chip.on{background:#13331f;color:#58c27d}
+  .chip.up{background:#33241a;color:#f0a35e}
+  .chip.down{background:#13331f;color:#58c27d}
+  .chip.flat{background:#2a241d;color:#9a8f80}
+  .feed{display:flex;align-items:center;gap:11px;padding:9px 0;border-bottom:1px solid #241f18}
+  .feed:last-child{border-bottom:0}
+  .feed .av{width:34px;height:34px;font-size:13px}
+  .feed .t{flex:1;min-width:0;font-size:14.5px}
+  .feed .tm{font-size:12px;color:#8a8072}
+  .empty{color:#8a8072;font-size:14px;padding:8px 0}
+  .links{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .links a{display:block;text-align:center;padding:15px 10px;border-radius:14px;background:#201b15;border:1px solid #352e25;
+    color:#f4efe7;text-decoration:none;font-weight:650;font-size:14px}
+  .links a:active{opacity:.75}
+  .note{color:#c9992e;font-size:12px;background:#2a2110;border:1px solid #4a3a16;border-radius:12px;padding:9px 12px}
+  .foot{color:#6f655a;font-size:12px;text-align:center;padding:6px 0 10px}
+  .loading{color:#9a8f80;text-align:center;padding:48px 0}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="hi"><b id="greet">Hello</b><span id="store">Shah's Halal — Groton</span></div>
+  <button class="iconbtn" id="refresh" aria-label="Refresh">↻</button>
+  <button class="iconbtn" id="logout" aria-label="Sign out">⏻</button>
+</header>
+<div id="pushbar" class="wrap" style="padding-top:0;padding-bottom:0"></div>
+<div class="wrap" id="root">
+  <div class="loading">Loading…</div>
+</div>
+<script src="/static/owner.js"></script>
+<script src="/static/push.js"></script>
+<script src="/static/nav.js"></script>
+</body>
+</html>
