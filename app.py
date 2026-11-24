@@ -493,6 +493,11 @@ def api_whoami():
 
 @app.route("/admin")
 def admin_page():
+    # Manager console is OWNER-only: on the tablet the gear button hits the owner
+    # password wall, so staff can't reach Team/Settings/Reports. (Staff/managers
+    # still do inventory counts at /inventory with the inventory PIN.)
+    if not valid_owner_cookie(db()):
+        return redirect("/owner/login")
     return render_template("admin.html")
 
 @app.route("/owner")
@@ -519,7 +524,10 @@ def owner_login():
         LOGIN_FAILS.pop(ip, None)
         audit(con, "owner", "login", ""); con.commit()
         resp = make_response(jsonify({"ok": True}))
-        resp.set_cookie(OWNER_COOKIE, make_owner_cookie(con), max_age=30 * 24 * 3600,
+        # Stay logged in for 30 days on the phone (public URL); on the shop tablet
+        # (LAN) re-lock after 12h so the owner side isn't left open for staff.
+        owner_ttl = 30 * 24 * 3600 if is_public_host() else 12 * 3600
+        resp.set_cookie(OWNER_COOKIE, make_owner_cookie(con), max_age=owner_ttl,
                         httponly=True, samesite="Lax", secure=is_public_host(), path="/")
         return resp
     cnt += 1

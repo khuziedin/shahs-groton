@@ -29,7 +29,16 @@
   }
 
   /* ---------- login ---------- */
-  async function boot(){ if(token())show(); else renderLock(); }
+  async function boot(){
+    if(token()){ show(); return; }
+    // The console is owner-only (server redirects non-owners to the owner login),
+    // so if the owner cookie is present, open straight in — no manager PIN step.
+    try{
+      const w=await (await fetch("/api/whoami",{credentials:"same-origin"})).json();
+      if(w&&w.owner){ show(); return; }
+    }catch(e){}
+    renderLock();
+  }
   function renderLock(){
     const root=$("#root"); root.innerHTML="";
     const w=el("div","lock");
