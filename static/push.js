@@ -10,7 +10,7 @@
     bar.innerHTML =
       '<div style="background:#1c1811;border:1px solid #2a241d;border-radius:16px;' +
       'padding:16px;margin:4px auto 20px;max-width:640px;' +
-      'font-family:-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;color:#f4efe7">' +
+      'font-family:\'IBM Plex Sans\',-apple-system,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;color:#f4efe7">' +
       inner + '</div>';
   }
   function note(msg) {
