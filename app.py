@@ -525,7 +525,8 @@ def owner_login():
     if request.method == "GET":
         return render_template("owner_login.html",
                                need_setup=(get_setting(con, "owner_pass_hash", "") == ""),
-                               store=get_setting(con, "store_name"))
+                               store=get_setting(con, "store_name"),
+                               show_back=(not is_public_host()))  # tablet only: a way back to the kiosk
     ip = (request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0]).strip()
     cnt, lock = LOGIN_FAILS.get(ip, (0, 0))
     if lock > time.time():
