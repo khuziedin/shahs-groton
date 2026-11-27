@@ -18,7 +18,6 @@
 
   const S={tab:"dashboard",week:null};
 
-  // after a self-update the server restarts; poll until it answers, then reload
   function waitForRestart(){
     let tries=0;
     const iv=setInterval(async()=>{
@@ -28,11 +27,8 @@
     },1500);
   }
 
-  /* ---------- login ---------- */
   async function boot(){
     if(token()){ show(); return; }
-    // The console is owner-only (server redirects non-owners to the owner login),
-    // so if the owner cookie is present, open straight in — no manager PIN step.
     try{
       const w=await (await fetch("/api/whoami",{credentials:"same-origin"})).json();
       if(w&&w.owner){ show(); return; }
@@ -71,7 +67,6 @@
   }
   function loadingInto(b){b.innerHTML='<div class="loading"><div class="spin"></div><div>Loading…</div></div>';}
 
-  /* ---------- dashboard ---------- */
   async function renderDashboard(b){
     loadingInto(b);
     const d=await api("/api/admin/dashboard");
@@ -101,7 +96,6 @@
   function stat(k,v){const c=el("div","stat");c.innerHTML='<div class="k">'+k+'</div><div class="v">'+v+'</div>';return c;}
   function banner(html){const d=el("div","banner");d.innerHTML=html;return d;}
 
-  /* ---------- week bar ---------- */
   function weekBar(onnav,extra){
     const bar=el("div","weekbar");
     const prev=el("button","nav","‹");prev.onclick=()=>onnav(-7);
@@ -117,7 +111,6 @@
     $("#wklbl").innerHTML=r+"<small>"+(thisWeek?"This week":"Week of "+wk)+" · Mon–Sun</small>";
   }
 
-  /* ---------- report ---------- */
   async function renderReport(b){
     loadingInto(b);
     const d=await api("/api/admin/report"+(S.week?"?week="+S.week:""));
@@ -153,7 +146,6 @@
   function nav(days){ const [y,m,da]=S.week.split("-").map(Number);const d=new Date(y,m-1,da+days);
     S.week=d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate()); show(); }
 
-  /* ---------- timesheet ---------- */
   async function renderTimesheet(b){
     loadingInto(b);
     const d=await api("/api/admin/timesheet"+(S.week?"?week="+S.week:""));
@@ -204,7 +196,6 @@
     if(r.ok){toast("Shift added — set the times");show();}else toast(r.error||"Error");
   }
 
-  /* ---------- team ---------- */
   async function renderTeam(b){
     loadingInto(b);
     const emps=await api("/api/admin/employees");
@@ -215,7 +206,7 @@
       if(r.ok){toast("Added — set name, PIN & wage");show();}else toast(r.error||"Error");};
     top.appendChild(add); b.appendChild(top);
     emps.forEach(e=>b.appendChild(teamRow(e)));
-    const note=el("p","muted small mt");note.innerHTML="Keep PINs unique. OT rate blank = same as base (no premium). Deactivate instead of deleting so past hours stay intact.";
+    const note=el("p","muted small mt");note.innerHTML="Keep PINs unique. OT rate blank = same as base (no premium). <b>Delete</b> takes someone off your roster (kiosk, schedule, reports). Their past hours stay saved in your records and backups.";
     b.appendChild(note);
   }
   function nextPin(emps){for(let n=1001;n<9999;n++){if(!emps.some(e=>String(e.pin)===String(n)))return String(n);}return "0000";}
@@ -238,13 +229,20 @@
     save.onclick=async()=>{save.disabled=true;
       const r=await api("/api/admin/employees",{method:"POST",body:JSON.stringify({id:e.id,name:name.value.trim()||e.name,pin:pin.value.trim(),email:email.value.trim(),pay_type:ptype.value,rate:rate.value,ot_rate:ot.value===""?null:ot.value,ot_threshold:thr.value,active:e.active})});
       if(r.ok){toast("Saved");}else{save.disabled=false;toast(r.error||"Error");}};
-    const act=el("button","btn sm",e.active?"Deactivate":"Reactivate");
-    act.onclick=async()=>{await api("/api/admin/employees",{method:"POST",body:JSON.stringify({id:e.id,name:name.value,pin:pin.value,email:email.value.trim(),pay_type:ptype.value,rate:rate.value,ot_rate:ot.value===""?null:ot.value,ot_threshold:thr.value,active:e.active?false:true})});show();};
+    const act=el("button","btn sm","Delete");act.style.color="var(--crit)";
+    act.onclick=async()=>{
+      if(act.dataset.a){
+        const r=await api("/api/admin/employees/"+e.id,{method:"DELETE"});
+        if(r.ok){toast("Removed "+(e.name||"employee"));show();}else toast(r.error||"Error");
+      }else{
+        act.dataset.a="1";act.textContent="Tap again to remove";act.style.background="var(--crit-dim)";
+        setTimeout(function(){act.dataset.a="";act.textContent="Delete";act.style.background="";},3000);
+      }
+    };
     box.appendChild(save);box.appendChild(act);actions.appendChild(box);row.appendChild(actions);
     return row;
   }
 
-  /* ---------- photos ---------- */
   async function renderPhotos(b){
     loadingInto(b);
     const ph=await api("/api/admin/photos");
@@ -265,7 +263,6 @@
     b.appendChild(grid);
   }
 
-  /* ---------- audit ---------- */
   async function renderAudit(b){
     loadingInto(b);
     const rows=await api("/api/admin/audit");
@@ -278,13 +275,11 @@
     b.appendChild(wrap);
   }
 
-  /* ---------- settings ---------- */
   async function renderSettings(b){
     loadingInto(b);
     const s=await api("/api/admin/settings");
     b.innerHTML="";
 
-    // remote access
     const ca=card("Open from your laptop or phone","On the same Wi-Fi as the tablet, visit these addresses in any browser. The manager console still needs the PIN.");
     const url="http://"+(s.lan_ip||"localhost")+":"+(s.port||"8080");
     const mk=(label,u)=>{const d=el("div","kv");const sp=el("span",null,label);const code=el("b");code.style.fontFamily="var(--font-mono)";code.style.userSelect="all";code.textContent=u;const cp=el("button","btn sm","Copy");cp.style.marginLeft="8px";cp.onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(u).then(()=>toast("Copied")).catch(()=>toast(u));};const right=el("div");right.style.display="flex";right.style.alignItems="center";right.appendChild(code);right.appendChild(cp);d.appendChild(sp);d.appendChild(right);return d;};
@@ -294,7 +289,6 @@
     ca.appendChild(tip);
     b.appendChild(ca);
 
-    // owner phone dashboard + remote login
     const cor=card("Owner phone dashboard","A private, phone-friendly view just for you — who's on now, today's & this week's hours and labor cost. Protected by an owner password you set here.");
     cor.appendChild(mk("Your dashboard",url+"/owner"));
     const opStatus=el("p","muted small");opStatus.style.margin="4px 0 10px";
@@ -313,7 +307,6 @@
     cor.appendChild(otip);
     b.appendChild(cor);
 
-    // software updates
     const cu=card("Software updates","Pull the latest version from GitHub and restart. Your data is never touched, and a broken update rolls back on its own.");
     const vkv=el("div","kv");vkv.innerHTML='<span>Current version</span><b id="verline">checking…</b>';cu.appendChild(vkv);
     const ust=el("p","muted small");ust.id="ustatus";ust.style.margin="8px 0 12px";cu.appendChild(ust);
@@ -332,7 +325,6 @@
       if(v&&v.git){vl.textContent=v.commit+" · "+v.date;}else{vl.textContent="not a GitHub copy yet";
         const btn=$("#ustatus");if(btn)btn.textContent="This install updates by zip for now. Set it up from GitHub to enable one-click updates.";}}).catch(()=>{});
 
-    // manager pin
     const c1=card("Manager PIN","Protects this console. Staff never see it.");
     const np=inp("text","4–6 digits");np.inputMode="numeric";np.maxLength=6;
     c1.appendChild(field("New manager PIN",np));
@@ -347,7 +339,6 @@
       if(withDay)g.appendChild(field("Day",dayS));g.appendChild(field("Hour (0–23)",hrS));g.appendChild(field("Min",mnS));return g;};
     const chk=(labelTxt,on)=>{const l=el("label");l.style.display="flex";l.style.gap="8px";l.style.alignItems="center";l.style.fontSize="13px";l.style.cursor="pointer";l.style.marginBottom="12px";const c=el("input");c.type="checkbox";c.checked=on;c.style.width="auto";l.appendChild(c);l.appendChild(document.createTextNode(labelTxt));l._c=c;return l;};
 
-    // email credentials
     const c2=card("Email setup","How the tablet sends your reports. Set this once.");
     const method=sel([["smtp","Gmail direct (app password)"],["gmail_api","Gmail API (your account, port 443)"],["brevo","Email service (Brevo)"]],s.email_method||"smtp");
     const su=inp("email","your.gmail@gmail.com");su.value=s.smtp_user||"";
@@ -372,7 +363,6 @@
     c2.appendChild(en);
     b.appendChild(c2);
 
-    // owner — daily digest
     const cd=card("Daily digest (to you)","Every morning you get a short email of the previous day's hours per employee.");
     const dEnable=chk("Send the daily digest",s.daily_report==="1");cd.appendChild(dEnable);
     const dHr=inp("number","");dHr.value=s.daily_report_hour||"7";dHr.min=0;dHr.max=23;
@@ -383,7 +373,6 @@
     cdRow.appendChild(testBtn("Send test daily","daily"));
     cd.appendChild(cdRow);b.appendChild(cd);
 
-    // owner — weekly team summary
     const cw=card("Weekly team summary (to you)","Your whole-team hours & pay for the week that just ended.");
     const wDay=sel(DAYS,s.report_day||"0");
     const wHr=inp("number","");wHr.value=s.report_hour||"7";wHr.min=0;wHr.max=23;
@@ -394,7 +383,6 @@
     cwRow.appendChild(testBtn("Send test weekly","weekly"));
     cw.appendChild(cwRow);b.appendChild(cw);
 
-    // employees — weekly on payroll day
     const ce=card("Employee weekly pay stubs","On payroll day each employee who has an email gets their own hours & gross pay for the week that ended Sunday. Default: Wednesday.");
     const eEnable=chk("Email employees their weekly hours",s.employee_reports==="1");ce.appendChild(eEnable);
     const pDay=sel(DAYS,s.payroll_day||"2");
@@ -408,7 +396,6 @@
     const eNote=el("p","muted small mt");eNote.innerHTML="Set each person's email in <b>Team</b>. The test sends one sample stub to your owner address.";
     ce.appendChild(eNote);b.appendChild(ce);
 
-    // payroll & rounding
     const cpr=card("Payroll & rounding","Your payroll workbook attaches to the Monday email. Rounding applies ONLY to the emailed reports and payroll — the app always shows actual clock times.");
     const rnd=sel([["0","No rounding"],["5","Nearest 5 min"],["10","Nearest 10 min"],["15","Nearest 15 min"],["30","Nearest 30 min"]],s.round_minutes||"15");
     cpr.appendChild(field("Round punches to",rnd));
@@ -421,7 +408,6 @@
     cpr.appendChild(saveBtn("Save",async()=>{await api("/api/admin/settings",{method:"POST",body:JSON.stringify({round_minutes:rnd.value,attach_payroll:attach._c.checked?"1":"0",gusto_sync:gsync._c.checked?"1":"0",gusto_url:gurl.value.trim()})});toast("Saved");}));
     b.appendChild(cpr);
 
-    // operations
     const c3=card("Automation","Hands-off housekeeping that runs on the tablet.");
     c3.innerHTML+='<div class="kv"><span>Auto clock-out</span><b>Closes a forgotten punch after '+(s.auto_clockout_hours||14)+'h, flagged for review</b></div>'+
       '<div class="kv"><span>Nightly backup</span><b>Keeps the last 30 days of the database</b></div>'+
@@ -434,7 +420,6 @@
     bkp.appendChild(bb);c3.appendChild(bkp);
     b.appendChild(c3);
 
-    // wages flag + store
     const c4=card("Store & wages","");
     const sn=inp("text","Store name");sn.value=s.store_name||"";
     c4.appendChild(field("Store name",sn));
@@ -448,12 +433,10 @@
     c4.appendChild(saveBtn("Save",async()=>{await api("/api/admin/settings",{method:"POST",body:JSON.stringify({store_name:sn.value.trim(),wages_placeholder:wpc.checked?"1":"0",photo_on_punch:poc.checked?"1":"0"})});toast("Saved");}));
     b.appendChild(c4);
 
-    // lock
     const c5=card("Lock","");c5.style.borderColor="color-mix(in srgb,var(--crit) 35%,transparent)";
     const lk=el("button","btn","Lock manager console");lk.onclick=()=>{try{sessionStorage.removeItem("tc_tok");}catch(e){}renderLock();};
     c5.appendChild(lk);b.appendChild(c5);
   }
-  /* ---------- inventory ---------- */
   function escH(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
   async function renderInventory(b){
     loadingInto(b);
@@ -463,7 +446,6 @@
     b.innerHTML="";
     const VN=inv.vnames||{shahs:"Shah's (IMS)",rd:"Restaurant Depot",pfg:"PFG",other:"Other"};
 
-    // settings
     const c1=card("Inventory counter","The password staff type to open the Inventory screen, and where finished orders are emailed.");
     const pw=inp("text","a word only staff know");pw.value=s.inv_password||"";
     const dl=inp("text","e.g. Sunday 3pm");dl.value=s.inv_deadline||"Sunday";
@@ -474,7 +456,6 @@
     c1.appendChild(saveBtn("Save",async()=>{await api("/api/admin/settings",{method:"POST",body:JSON.stringify({inv_password:pw.value.trim()||"1234",inv_deadline:dl.value.trim()||"Sunday",inv_order_to:to.value.trim()})});toast("Saved");}));
     b.appendChild(c1);
 
-    // history
     const c2=card("Recent counts","Every submitted count and the order it produced.");
     if(!hist.counts.length){const e=el("p","muted small");e.textContent="No counts yet — do one on the tablet's Inventory screen.";c2.appendChild(e);}
     else hist.counts.forEach(h=>{
@@ -487,7 +468,6 @@
     });
     b.appendChild(c2);
 
-    // par / vendor editor
     const c3=card("Par levels & vendors","Par = how much to keep on hand; Order = Par − On hand. Set the vendor so each item routes to the right list — flip items you buy from PFG here.");
     const srch=inp("search","Filter items…");c3.appendChild(srch);
     const listWrap=el("div");listWrap.style.cssText="max-height:60vh;overflow:auto;margin-top:10px";c3.appendChild(listWrap);
@@ -523,13 +503,11 @@
   function sel(opts,val){const s=el("select");opts.forEach(([v,l])=>{const o=el("option",null,l);o.value=v;if(v===val)o.selected=true;s.appendChild(o);});return s;}
   function saveBtn(label,fn){const b=el("button","btn primary",label);b.onclick=async()=>{b.disabled=true;try{await fn();}finally{b.disabled=false;}};return b;}
 
-  /* ---------- date helpers (local) ---------- */
   function toTimeInput(sec){const d=new Date(sec*1000);return pad2(d.getHours())+":"+pad2(d.getMinutes());}
   function toDateInput(sec){const d=new Date(sec*1000);return d.getFullYear()+"-"+pad2(d.getMonth()+1)+"-"+pad2(d.getDate());}
   function fromDateTime(dateStr,timeStr){const[y,m,d]=dateStr.split("-").map(Number);const[hh,mm]=timeStr.split(":").map(Number);return Math.floor(new Date(y,m-1,d,hh,mm,0,0).getTime()/1000);}
   function weekStartLocal(wk){const[y,m,d]=wk.split("-").map(Number);return new Date(y,m-1,d,0,0,0,0).getTime();}
 
-  // Back arrow returns to the kiosk AND signs out of the manager console.
   const _bk=document.getElementById("backKiosk");
   if(_bk)_bk.addEventListener("click",()=>{try{sessionStorage.removeItem("tc_tok");}catch(e){}});
 

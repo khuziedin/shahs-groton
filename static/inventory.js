@@ -19,7 +19,6 @@
 
   async function api(path,body){const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});return {status:r.status,json:await r.json().catch(()=>({}))};}
 
-  /* ---------- gate ---------- */
   function renderGate(err){
     APP.innerHTML="";
     const g=el("div","gate");
@@ -42,7 +41,6 @@
     g.appendChild(b); APP.appendChild(g); setTimeout(()=>inp.focus(),80);
   }
 
-  /* ---------- count ---------- */
   function visibleItems(){
     return S.items.filter(i=>{
       if(S.cat!=="All"&&i.cat!==S.cat)return false;
@@ -55,7 +53,6 @@
   function renderCount(){
     APP.innerHTML="";
     const w=el("div","wrap");
-    // meta
     const meta=el("div","meta");
     const nf=el("div","fld name");nf.innerHTML='<label>Counted by</label>';
     const nameI=el("input");nameI.placeholder="Your name";nameI.value=S.countedBy;nameI.oninput=()=>S.countedBy=nameI.value;nf.appendChild(nameI);
@@ -63,7 +60,6 @@
     const dI=el("input");dI.type="date";dI.value=S.date;dI.oninput=()=>S.date=dI.value;df.appendChild(dI);
     const dl=el("div","deadline","⏰ Deadline: "+S.deadline);
     meta.appendChild(nf);meta.appendChild(df);meta.appendChild(dl);w.appendChild(meta);
-    // search + chips
     const sI=el("input","search");sI.placeholder="Search item or code…";sI.value=S.q;
     sI.oninput=()=>{S.q=sI.value.toLowerCase().trim();refreshList();};w.appendChild(sI);
     const chips=el("div","chips");["All",...S.cats].forEach(c=>{
@@ -74,7 +70,6 @@
     const prog=el("div","prog");prog.id="prog";w.appendChild(prog);
     const list=el("div");list.id="list";w.appendChild(list);
     APP.appendChild(w);
-    // bottom bar
     const bar=el("div","bar");bar.innerHTML='<div class="counts" id="barCounts"></div>';
     const rev=el("button","btn","Review");rev.id="toReview";rev.onclick=()=>renderReview();bar.appendChild(rev);
     APP.appendChild(bar);
@@ -112,7 +107,6 @@
     const sg=row.querySelector(".sugg");let val;
     if(s==null)val='<span class="val none">—</span>';else if(st==="out")val='<span class="val out">OUT</span>';else val='<span class="val '+st+'">'+orderQty(i)+'</span>';
     sg.innerHTML='<div class="lab">Order</div>'+val+'<div class="pn">par '+effPar(i)+'</div>';
-    // update progress
     const items=visibleItems();let c=0;items.forEach(x=>{if(onHand(x.code)!=null)c++;});$("#prog").textContent=c+" of "+items.length+" counted";
   }
   function vendorTotals(){const t={shahs:0,rd:0,pfg:0,other:0};S.items.forEach(i=>{if(orderQty(i)>0)t[i.vendor]=(t[i.vendor]||0)+1;});return t;}
@@ -123,7 +117,6 @@
     const total=t.shahs+t.rd+t.pfg+t.other;const b=$("#toReview");b.disabled=total===0;b.textContent=total?"Review ("+total+")":"Nothing yet";
   }
 
-  /* ---------- review ---------- */
   function renderReview(){
     APP.innerHTML="";const w=el("div","wrap");
     const back=el("button","btn ghost","← Back to count");back.style.marginBottom="12px";back.onclick=renderCount;w.appendChild(back);
@@ -178,7 +171,6 @@
     renderDone(r.json);
   }
 
-  /* ---------- done ---------- */
   function renderDone(j){
     APP.innerHTML="";const w=el("div","done");
     const emailed=j.emailed;
@@ -194,8 +186,6 @@
 
   function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 
-  // Owner (signed into the phone app) skips the inventory password; staff on the
-  // tablet still get the lock screen.
   async function boot(){
     try{
       const r=await api("/api/inv/unlock",{password:""});

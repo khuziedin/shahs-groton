@@ -1,6 +1,3 @@
-// Shared bottom navigation for the manager/owner pages (not the staff kiosk).
-// Role-aware: the owner sees Home/Schedule/Inventory/Console; a manager (no
-// owner session) sees only Inventory/Console.
 (function () {
   var ALL = {
     home:  { href: "/owner",     label: "Home",      icon: "⌂" },

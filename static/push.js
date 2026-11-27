@@ -1,7 +1,3 @@
-// Owner phone push-notification control (clock in/out alerts).
-// Lives in #pushbar on the Manager console (owner-only). Self-contained styling
-// so it renders correctly regardless of the page's stylesheet. Registers the
-// service worker and manages this phone's push subscription.
 (function () {
   var bar = document.getElementById('pushbar');
   if (!bar) return;
@@ -21,7 +17,6 @@
   var BTN_ON = 'border:1px solid #b06d10;background:#b06d10;color:#fff;border-radius:12px;' +
                'padding:9px 16px;font-size:14px;font-weight:700;cursor:pointer';
 
-  // Only the owner manages notifications.
   fetch('/api/whoami', { credentials: 'same-origin' })
     .then(function (r) { return r.ok ? r.json() : {}; })
     .then(function (w) { if (w && w.owner) start(); })

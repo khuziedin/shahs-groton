@@ -1,4 +1,3 @@
-// Shift scheduler + Kitchen/Front staffing-level coverage. Owner only.
 (function () {
   var $ = function (s, r) { return (r || document).querySelector(s); };
   var root = $("#root"), ov = $("#ov");
@@ -45,11 +44,16 @@
   }
 
   function render(){
+    covPinned=null; try{ if(covtip) covtip.style.display="none"; }catch(e){}
     try{ $("#store").textContent=DATA.store||"Shah's Halal — Groton"; }catch(e){}
     var days=DATA.days;
     $("#range").textContent=MON[parseD(days[0]).getMonth()]+" "+parseD(days[0]).getDate()+" – "+MON[parseD(days[6]).getMonth()]+" "+parseD(days[6]).getDate();
     var open=hhmmToMin(DATA.open), closeWk=hhmmToMin(DATA.close), closeWe=hhmmToMin(DATA.close_wknd||"24:00");
     var areas=DATA.areas, rate={}, nameOf={};
+    var AORDER=["Front","Kitchen"];
+    function arank(a){var i=AORDER.indexOf(a);return i<0?AORDER.length+areas.indexOf(a):i;}
+    var dispAreas=areas.slice().sort(function(a,b){return arank(a)-arank(b);});
+    function acol(a){var i=areas.indexOf(a);return AREA_COLORS[(i<0?0:i)%AREA_COLORS.length];}
     DATA.employees.forEach(function(e){rate[e.id]=e.rate||0;});
     var byDay={}; days.forEach(function(d){byDay[d]=[];});
     DATA.shifts.forEach(function(s){ if(byDay[s.day]) byDay[s.day].push(s); nameOf[s.emp_id]=s.name; });
@@ -70,8 +74,8 @@
             '<div class="tot">'+ds.length+(ds.length===1?' shift':' shifts')+' · '+(totMin/60).toFixed(1)+'h'+(labor>0?' · $'+Math.round(labor):'')+'</div></div>';
 
       html+='<div class="cov">';
-      areas.forEach(function(area,ai){
-        var col=AREA_COLORS[ai%AREA_COLORS.length];
+      dispAreas.forEach(function(area){
+        var col=acol(area);
         var ivs=ds.filter(function(s){return s.area===area;}).map(function(s){return [s.start_min,s.end_min];});
         var dispSegs=levelSegs(ivs,open,dispClose), peak=0, bars="";
         dispSegs.forEach(function(sg){
@@ -80,9 +84,8 @@
           var l=(sg[0]-open)/span*100, w=(sg[1]-sg[0])/span*100;
           var op=Math.min(1,0.42+0.22*(sg[2]-1));
           var lbl=w>6?'<span class="cnt">'+sg[2]+'</span>':'';
-          bars+='<div class="seg" style="left:'+l.toFixed(2)+'%;width:'+w.toFixed(2)+'%;background:'+hexA(col,op)+'">'+lbl+'</div>';
+          bars+='<div class="seg" data-area="'+esc(area)+'" data-a="'+sg[0]+'" data-b="'+sg[1]+'" data-col="'+col+'" data-n="'+sg[2]+'" style="left:'+l.toFixed(2)+'%;width:'+w.toFixed(2)+'%;background:'+hexA(col,op)+'">'+lbl+'</div>';
         });
-        // operating-close marker (shows where "close" is vs cleanup time)
         if(dispClose>oClose){ bars+='<div class="closemark" style="left:'+((oClose-open)/span*100).toFixed(2)+'%"></div>'; }
         html+='<div class="covrow"><div class="lbl" style="color:'+col+'">'+esc(area)+'</div><div class="track">'+bars+'</div></div>';
         var gapSegs=levelSegs(ivs,open,oClose).filter(function(s){return s[2]<=0;});
@@ -94,20 +97,27 @@
       html+='</div>';
 
       if(!ds.length) html+='<div class="none">No shifts yet.</div>';
-      else ds.forEach(function(s){
-        var ai=areas.indexOf(s.area); var col=AREA_COLORS[(ai<0?0:ai)%AREA_COLORS.length];
-        html+='<div class="shift" data-id="'+s.id+'" data-day="'+day+'">'+
-          '<span class="dot" style="background:'+col+'"></span>'+
-          '<span class="nm">'+esc(s.name)+'</span>'+
-          '<span class="ar" style="color:'+col+'">'+esc(s.area)+'</span>'+
-          '<span class="tm">'+t12(s.start_min)+"–"+t12(s.end_min)+'</span></div>';
-      });
+      else {
+        var listAreas=dispAreas.slice();
+        ds.forEach(function(s){ if(listAreas.indexOf(s.area)<0) listAreas.push(s.area); });
+        listAreas.forEach(function(area){
+          var list=ds.filter(function(s){return s.area===area;});
+          if(!list.length) return;
+          var col=acol(area);
+          html+='<div class="arehdr" style="color:'+col+'">'+esc(area)+'</div>';
+          list.forEach(function(s){
+            html+='<div class="shift" data-id="'+s.id+'" data-day="'+day+'" data-area="'+esc(s.area)+'" data-s="'+s.start_min+'" data-e="'+s.end_min+'">'+
+              '<span class="dot" style="background:'+col+'"></span>'+
+              '<span class="nm">'+esc(s.name)+'</span>'+
+              '<span class="tm">'+t12(s.start_min)+"–"+t12(s.end_min)+'</span></div>';
+          });
+        });
+      }
       html+='<div class="dayacts"><button class="addbtn" data-add="'+day+'">+ Add shift</button>'+
             '<button class="cpbtn" data-cpday="'+day+'" title="Copy previous day">⧉ Yesterday</button></div>';
       html+='</div>';
     });
 
-    // ---- week totals ----
     var perEmp={}, perArea={}, grandMin=0, grandLabor=0;
     DATA.shifts.forEach(function(s){
       var mins=s.end_min-s.start_min;
@@ -120,8 +130,9 @@
           '<div class="tot">'+(grandMin/60).toFixed(1)+'h'+(grandLabor>0?' · $'+Math.round(grandLabor):'')+'</div></div>';
     if(!sumRows.length) html+='<div class="none">No shifts scheduled this week.</div>';
     else sumRows.forEach(function(r){
-      html+='<div class="sumrow"><div class="nm">'+esc(r.name)+'</div><div class="mt">'+(r.mins/60).toFixed(1)+'h'+
-            (rate[r.id]?' · $'+Math.round(r.mins/60*rate[r.id]):'')+'</div></div>';
+      html+='<div class="sumrow"><div class="nm">'+esc(r.name)+'</div>'+
+            '<div class="mt">'+(r.mins/60).toFixed(1)+'h'+(rate[r.id]?' · $'+Math.round(r.mins/60*rate[r.id]):'')+
+            '<button class="embtn" data-eid="'+r.id+'" data-nm="'+esc(r.name)+'" title="Email this person their schedule">✉</button></div></div>';
     });
     html+='<div class="arealine">'+areas.map(function(a,ai){return '<span style="color:'+AREA_COLORS[ai%AREA_COLORS.length]+'">'+esc(a)+' '+((perArea[a]||0)/60).toFixed(1)+'h</span>';}).join('')+'</div>';
     html+='</div>';
@@ -129,6 +140,8 @@
     root.innerHTML=html;
 
     $("#copywk").onclick=copyWeek; $("#emailwk").onclick=emailWeek;
+    Array.prototype.forEach.call(root.querySelectorAll(".embtn"),function(el){
+      el.onclick=function(ev){ev.stopPropagation();emailOne(+el.getAttribute("data-eid"),el.getAttribute("data-nm"));};});
     Array.prototype.forEach.call(root.querySelectorAll(".shift"),function(el){
       el.onclick=function(){var id=+el.getAttribute("data-id");var s=DATA.shifts.filter(function(x){return x.id===id;})[0];if(s)sheet(el.getAttribute("data-day"),s);};});
     Array.prototype.forEach.call(root.querySelectorAll(".addbtn"),function(el){
@@ -180,6 +193,14 @@
     var j=await r.json().catch(function(){return{};});
     if(r.ok&&j.ok){ toast(j.copied?("Copied "+j.copied+" shifts"):"Previous day was empty"); load(WEEK,true); } else toast("Couldn't copy");
   }
+  async function emailOne(eid,name){
+    if(!confirm("Email "+name+" their schedule for this week?"))return;
+    toast("Sending…");
+    var r=await fetch("/api/sched/email",{method:"POST",headers:{"Content-Type":"application/json"},credentials:"same-origin",body:JSON.stringify({week:WEEK,emp_id:eid})});
+    var j=await r.json().catch(function(){return{};});
+    if(r.ok&&j.ok){ toast(j.sent?("Emailed "+name):(name+" has no email on file")); }
+    else toast(j.error||"Couldn't send");
+  }
   async function emailWeek(){
     if(!confirm("Email each person their shifts + hours for this week? (Only people with an email on file.)"))return;
     toast("Sending…");
@@ -188,6 +209,48 @@
     if(r.ok&&j.ok){ toast("Emailed "+j.sent+(j.skipped&&j.skipped.length?(" · "+j.skipped.length+" had no email"):"")); }
     else toast(j.error||"Couldn't send");
   }
+
+  var covtip=document.createElement("div"); covtip.id="covtip"; document.body.appendChild(covtip);
+  var covPinned=null;
+  function clearHL(){
+    Array.prototype.forEach.call(root.querySelectorAll(".shift.hl"),function(el){el.classList.remove("hl");el.style.removeProperty("--hlc");});
+    Array.prototype.forEach.call(root.querySelectorAll(".seg.seg-on"),function(el){el.classList.remove("seg-on");});
+    Array.prototype.forEach.call(root.querySelectorAll(".day.probing"),function(el){el.classList.remove("probing");});
+    covtip.style.display="none";
+  }
+  function showCov(seg,pin){
+    clearHL();
+    var dayCard=seg.closest(".day"); if(!dayCard) return;
+    var area=seg.getAttribute("data-area"), a=+seg.getAttribute("data-a"), b=+seg.getAttribute("data-b"), col=seg.getAttribute("data-col");
+    seg.classList.add("seg-on"); dayCard.classList.add("probing");
+    var names=[];
+    Array.prototype.forEach.call(dayCard.querySelectorAll(".shift"),function(el){
+      if(el.getAttribute("data-area")===area && (+el.getAttribute("data-s"))<=a && (+el.getAttribute("data-e"))>=b){
+        el.classList.add("hl"); el.style.setProperty("--hlc",col);
+        var nm=el.querySelector(".nm"); if(nm) names.push(nm.textContent);
+      }
+    });
+    covtip.innerHTML='<div style="color:'+col+';font-weight:800;margin-bottom:3px">'+esc(area)+' · '+t12(a)+"–"+t12(b)+'</div>'+
+      (names.length?('<div>'+names.map(esc).join("<br>")+'</div>'):'<div style="color:#8a8072">no one scheduled</div>');
+    covtip.style.visibility="hidden"; covtip.style.display="block";
+    var r=seg.getBoundingClientRect(), th=covtip.offsetHeight, tw=covtip.offsetWidth;
+    var left=Math.max(8,Math.min(window.innerWidth-tw-8, r.left+r.width/2-tw/2));
+    var top=r.top-th-10; if(top<8) top=r.bottom+10;
+    covtip.style.left=left+"px"; covtip.style.top=top+"px"; covtip.style.visibility="visible";
+    if(pin) covPinned=seg;
+  }
+  function segAt(e){ return (e.target&&e.target.closest)?e.target.closest(".seg[data-a]"):null; }
+  if(window.matchMedia && window.matchMedia("(hover: hover)").matches){
+    root.addEventListener("pointerover",function(e){ var s=segAt(e); if(s&&!covPinned) showCov(s,false); });
+    root.addEventListener("pointerout",function(e){ if(segAt(e)&&!covPinned) clearHL(); });
+  }
+  root.addEventListener("click",function(e){
+    var s=segAt(e); if(!s) return;
+    e.stopPropagation();
+    if(covPinned===s){ covPinned=null; clearHL(); } else { showCov(s,true); }
+  });
+  document.addEventListener("click",function(e){ if(covPinned&&!segAt(e)){ covPinned=null; clearHL(); } });
+  window.addEventListener("scroll",function(){ if(covPinned){ covPinned=null; clearHL(); } },{passive:true});
 
   $("#prev").onclick=function(){ load(addDays(WEEK,-7),false); };
   $("#next").onclick=function(){ load(addDays(WEEK,7),false); };

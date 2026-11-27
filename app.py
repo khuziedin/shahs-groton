@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""
-Shah's Halal — Groton Time Clock
-Self-contained time-clock kiosk for an Android tablet (Termux).
-Python + Flask + SQLite. Everything is stored locally in data/timeclock.db.
-
-Runs a local web server; open http://localhost:8080 in the tablet browser (kiosk).
-No internet needed to clock in/out. Internet is used only to send the weekly email.
-"""
+"""Shah's Halal — Groton Time Clock"""
 
 import os, sys, subprocess, sqlite3, json, time, threading, csv, io, smtplib, ssl, shutil, secrets, hashlib, hmac, ipaddress
 import urllib.request, urllib.error, urllib.parse
 try:
-    import creds as _creds          # data/credentials.json loader (gmail + portal logins)
+    import creds as _creds
 except Exception:
     _creds = None
 from datetime import datetime, timedelta, date
@@ -20,13 +13,12 @@ from email.mime.text import MIMEText
 
 try:
     from zoneinfo import ZoneInfo
-except Exception:  # pragma: no cover
+except Exception:
     ZoneInfo = None
 
 from flask import (Flask, request, jsonify, send_from_directory,
                    render_template, g, abort, redirect, make_response)
 
-# ----------------------------------------------------------------------------
 BASE   = os.path.dirname(os.path.abspath(__file__))
 DATA   = os.path.join(BASE, "data")
 DB     = os.path.join(DATA, "timeclock.db")
@@ -55,63 +47,56 @@ def lan_ip():
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
-# ---- defaults --------------------------------------------------------------
 DEFAULT_SETTINGS = {
     "store_name": "Shah's Halal — Groton",
     "admin_pin": "1234",
     "report_email": "",
-    "report_day": "0",          # 0=Monday
+    "report_day": "0",
     "report_hour": "7",
     "report_min": "50",
     "ot_threshold": "40",
-    "round_minutes": "15",      # round each punch to the nearest N minutes (0 = off)
-    "attach_payroll": "1",      # attach the payroll workbook to the weekly owner email
-    "report_cc": "khuziedin@gmail.com",  # CC the weekly payroll email here so the cloud tips task can read the workbook (blank = off)
-    "gusto_sync": "0",          # attach a machine-readable hours CSV for the Gusto auto-fill task
-    "gusto_url": "https://app.gusto.com/payrolls",  # link to run payroll in Gusto
-    "auto_clockout_hours": "14", # a punch open longer than this gets auto-closed overnight
+    "round_minutes": "15",
+    "attach_payroll": "1",
+    "report_cc": "khuziedin@gmail.com",
+    "sales_token": "",
+    "sales_live": "1",
+    "gusto_sync": "0",
+    "gusto_url": "https://app.gusto.com/payrolls",
+    "auto_clockout_hours": "14",
     "auto_clockout_run_hour": "3",
     "wages_placeholder": "1",
     "smtp_host": "smtp.gmail.com",
     "smtp_port": "587",
-    "smtp_user": "",            # your gmail address (also the sender for the web-API method)
-    "smtp_pass": "",            # gmail APP PASSWORD (not your login password)
-    "email_method": "smtp",     # "smtp" (Gmail direct), "gmail_api" (your Google account over 443), or "brevo"
-    "brevo_api_key": "",        # Brevo API key when email_method is "brevo"
-    "photo_on_punch": "1",      # silently photograph each punch (in and out)
-    "photo_keep_days": "60",    # prune punch photos older than this
-    # owner weekly summary (whole team) — uses report_day/hour/min above
+    "smtp_user": "",
+    "smtp_pass": "",
+    "email_method": "smtp",
+    "brevo_api_key": "",
+    "photo_on_punch": "1",
+    "photo_keep_days": "60",
     "last_report_week": "",
-    # owner daily digest — the next morning, covering the day before
     "daily_report": "1", "daily_report_hour": "7", "daily_report_min": "40",
     "last_daily_report": "",
-    # per-employee weekly report on payroll day (Wednesday, for the week that ended Sunday)
     "employee_reports": "1", "payroll_day": "2", "payroll_hour": "8", "payroll_min": "5",
     "last_payroll_week": "",
-    # inventory / ordering
-    "inv_password": "1234",      # staff enter this to open the Inventory counter (change in Settings)
-    "inv_deadline": "Sunday",    # order deadline shown on the count screen
-    "inv_order_to": "",          # where finished orders email to (blank = owner report_email)
-    "sched_areas": "Kitchen,Front",  # scheduling areas (comma-separated); editable later
-    "sched_open": "10:00",       # schedule coverage timeline start
-    "sched_close": "23:00",      # operating close Sun–Thu (11pm)
-    "sched_close_wknd": "24:00", # operating close Fri & Sat (midnight)
-    # web push to the owner phone on clock in/out
-    "push_on_punch": "1",        # 1 = send the owner a notification on every punch
-    "vapid_priv": "",            # VAPID keypair (generated once on first run)
-    "vapid_pub": "",             # base64url public key = applicationServerKey
-    "vapid_sub": "",             # mailto: contact for push services (blank = owner email)
+    "inv_password": "1234",
+    "inv_deadline": "Sunday",
+    "inv_order_to": "",
+    "sched_areas": "Kitchen,Front",
+    "sched_open": "10:00",
+    "sched_close": "23:00",
+    "sched_close_wknd": "24:00",
+    "push_on_punch": "1",
+    "vapid_priv": "",
+    "vapid_pub": "",
+    "vapid_sub": "",
 }
 
-# Generic samples, only used to seed a brand-new install so it isn't empty.
-# Replace them in Manager -> Team. (An existing database is never re-seeded.)
 SEED_EMPLOYEES = [
     ("Sample Employee A", "1001", 15.00, None, 40, 1),
     ("Sample Employee B", "1002", 15.00, None, 40, 2),
     ("Sample Employee C", "1003", 15.00, None, 40, 3),
 ]
 
-# ---- db helpers ------------------------------------------------------------
 def db():
     if "db" not in g:
         g.db = sqlite3.connect(DB)
@@ -219,19 +204,25 @@ def init_db():
         title TEXT DEFAULT '',
         body TEXT DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS sales_live(
+        source TEXT NOT NULL,
+        day TEXT NOT NULL,
+        gross REAL DEFAULT 0,
+        net REAL DEFAULT 0,
+        orders INTEGER DEFAULT 0,
+        updated INTEGER DEFAULT 0,
+        PRIMARY KEY(source, day)
+    );
     """)
-    # migrations for databases created by an earlier version
     def ensure_col(table, col, decl):
         cols = [r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()]
         if col not in cols:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     ensure_col("employees", "email", "TEXT DEFAULT ''")
-    ensure_col("employees", "pay_type", "TEXT DEFAULT 'check'")  # 'check' (Gusto) or 'cash'
+    ensure_col("employees", "pay_type", "TEXT DEFAULT 'check'")
     ensure_col("punches", "photo_out", "TEXT")
-    # seed settings
     for k, v in DEFAULT_SETTINGS.items():
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
-    # seed employees once
     n = con.execute("SELECT COUNT(*) FROM employees").fetchone()[0]
     if n == 0:
         now = int(time.time())
@@ -240,7 +231,6 @@ def init_db():
                            VALUES(?,?,?,?,?,1,?,?)""", (name, pin, rate, otr, thr, order, now))
         con.execute("INSERT INTO audit(ts,actor,action,detail) VALUES(?,?,?,?)",
                     (now, "system", "seed", f"Seeded {len(SEED_EMPLOYEES)} employees"))
-    # seed inventory catalog once (pars/vendors become editable in Manager -> Inventory)
     ni = con.execute("SELECT COUNT(*) FROM inv_items").fetchone()[0]
     if ni == 0:
         for i, it in enumerate(INV_CATALOG):
@@ -265,7 +255,6 @@ def audit(con, actor, action, detail=""):
     con.execute("INSERT INTO audit(ts,actor,action,detail) VALUES(?,?,?,?)",
                 (int(time.time()), actor, action, detail))
 
-# ---- time / pay math -------------------------------------------------------
 def local_dt(epoch):
     return datetime.fromtimestamp(epoch, TZ())
 
@@ -294,7 +283,7 @@ def shift_add_days(week_key_str, days):
     d = date(y, mo, da) + timedelta(days=days)
     return d.strftime("%Y-%m-%d")
 
-ROUND_MIN = 15  # refreshed from settings at startup and on settings save
+ROUND_MIN = 15
 
 def refresh_round(con):
     global ROUND_MIN
@@ -319,11 +308,9 @@ def hours_of(p, rounded=False):
     return max(0.0, (b - a) / 3600.0)
 
 def compute_week(con, week_key_str, rounded=False):
-    """Return list of per-employee totals for a week + grand totals.
-       rounded=True applies punch rounding (used by payroll/email, not the in-app views)."""
+    """Return list of per-employee totals for a week + grand totals."""
     start, end = week_bounds(week_key_str)
     emps = con.execute("SELECT * FROM employees ORDER BY sort_order, name").fetchall()
-    # punches that START within the week
     punches = con.execute(
         "SELECT * FROM punches WHERE clock_in>=? AND clock_in<? ORDER BY clock_in", (start, end)).fetchall()
     by_emp = {}
@@ -355,14 +342,12 @@ def compute_week(con, week_key_str, rounded=False):
         tot[k] = round(tot[k], 2)
     return rows, tot
 
-# ---- auth (admin) ----------------------------------------------------------
-TOKENS = {}  # token -> expiry epoch  (manager console, Bearer header)
+TOKENS = {}
 def new_token():
     t = secrets.token_urlsafe(24)
-    TOKENS[t] = time.time() + 60 * 60 * 12  # 12h
+    TOKENS[t] = time.time() + 60 * 60 * 12
     return t
 
-# ---- owner remote login (cookie session, for the phone dashboard) ----------
 def _secret(con):
     s = get_setting(con, "cookie_secret", "")
     if not s:
@@ -388,7 +373,7 @@ def verify_pw(pw, stored):
 
 OWNER_COOKIE = "tc_owner"
 def make_owner_cookie(con):
-    exp = int(time.time()) + 30 * 24 * 3600  # 30 days
+    exp = int(time.time()) + 30 * 24 * 3600
     return f"{exp}.{_sign(con, 'owner|' + str(exp))}"
 
 def valid_owner_cookie(con):
@@ -406,7 +391,7 @@ def valid_owner_cookie(con):
 
 MGR_COOKIE = "tc_mgr"
 def make_mgr_cookie(con):
-    exp = int(time.time()) + 12 * 3600  # 12h manager session
+    exp = int(time.time()) + 12 * 3600
     return f"{exp}.{_sign(con, 'mgr|' + str(exp))}"
 
 def valid_mgr_cookie(con):
@@ -431,36 +416,31 @@ def require_owner():
         abort(401)
 
 def is_public_host():
-    """True when the request arrived over a public URL (e.g. a Tailscale Funnel
-    or Cloudflare tunnel), as opposed to localhost or the shop LAN."""
+    """True when the request arrived over a public URL (e.g. a Tailscale Funnel"""
     host = (request.host or "").split(":")[0].strip().lower()
     if host in ("", "localhost", "0.0.0.0") or host.endswith(".local"):
         return False
     try:
         return not ipaddress.ip_address(host).is_private and not ipaddress.ip_address(host).is_loopback
     except ValueError:
-        return True  # a hostname like x.ts.net → treat as public (require login)
+        return True
 
 def require_admin():
     con = db()
-    if valid_owner_cookie(con) or valid_mgr_cookie(con):   # owner or manager session
+    if valid_owner_cookie(con) or valid_mgr_cookie(con):
         return
     auth = request.headers.get("Authorization", "")
     tok = auth[7:] if auth.startswith("Bearer ") else ""
     exp = TOKENS.get(tok)
     if not exp or exp < time.time():
         abort(401)
-    TOKENS[tok] = time.time() + 60 * 60 * 12  # sliding
+    TOKENS[tok] = time.time() + 60 * 60 * 12
 
 @app.before_request
 def _public_gate():
-    """On the shop LAN / localhost everything behaves as before (open kiosk).
-    Over a public URL, require the owner login for everything except the login
-    page and static assets — so the open clock-in screen is never exposed."""
+    """On the shop LAN / localhost everything behaves as before (open kiosk)."""
     if not is_public_host():
         return
-    # The public link is the OWNER's entry point — the root sends to the owner
-    # dashboard, never the staff clock-in kiosk (which is LAN-only).
     if request.path == "/":
         return redirect("/owner")
     con = db()
@@ -474,19 +454,12 @@ def _public_gate():
         abort(401)
     return redirect("/owner/login")
 
-# ----------------------------------------------------------------------------
-# PAGES
-# ----------------------------------------------------------------------------
 def _kiosk_response():
     resp = make_response(render_template("kiosk.html"))
-    # On the shop tablet (LAN), returning to the clock-in screen LOCKS the owner
-    # side: wipe any owner/manager session so staff can't reach it afterward.
-    # The owner must re-enter the password each time on the tablet. (On the phone
-    # / public URL this never runs — the owner stays logged in there.)
     if not is_public_host():
         resp.set_cookie(OWNER_COOKIE, "", max_age=0, path="/")
         resp.set_cookie(MGR_COOKIE, "", max_age=0, path="/")
-        resp.headers["Cache-Control"] = "no-store"   # always re-fetch so the lock runs
+        resp.headers["Cache-Control"] = "no-store"
     return resp
 
 @app.route("/")
@@ -495,7 +468,6 @@ def kiosk_page():
 
 @app.route("/kiosk")
 def kiosk_page2():
-    # reachable from the owner phone app too (owner-gated over the public link)
     return _kiosk_response()
 
 @app.route("/api/whoami")
@@ -505,20 +477,17 @@ def api_whoami():
 
 @app.route("/admin")
 def admin_page():
-    # Manager console is OWNER-only: on the tablet the gear button hits the owner
-    # password wall, so staff can't reach Team/Settings/Reports. (Staff/managers
-    # still do inventory counts at /inventory with the inventory PIN.)
     if not valid_owner_cookie(db()):
         return redirect("/owner/login")
     return render_template("admin.html")
 
 @app.route("/owner")
 def owner_page():
-    if not valid_owner_cookie(db()):      # owner-only, every host
+    if not valid_owner_cookie(db()):
         return redirect("/owner/login")
     return render_template("owner.html")
 
-LOGIN_FAILS = {}  # ip -> (fail_count, lock_until)
+LOGIN_FAILS = {}
 @app.route("/owner/login", methods=["GET", "POST"])
 def owner_login():
     con = db()
@@ -526,7 +495,7 @@ def owner_login():
         return render_template("owner_login.html",
                                need_setup=(get_setting(con, "owner_pass_hash", "") == ""),
                                store=get_setting(con, "store_name"),
-                               show_back=(not is_public_host()))  # tablet only: a way back to the kiosk
+                               show_back=(not is_public_host()))
     ip = (request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0]).strip()
     cnt, lock = LOGIN_FAILS.get(ip, (0, 0))
     if lock > time.time():
@@ -537,8 +506,6 @@ def owner_login():
         LOGIN_FAILS.pop(ip, None)
         audit(con, "owner", "login", ""); con.commit()
         resp = make_response(jsonify({"ok": True}))
-        # Stay logged in for 30 days on the phone (public URL); on the shop tablet
-        # (LAN) re-lock after 12h so the owner side isn't left open for staff.
         owner_ttl = 30 * 24 * 3600 if is_public_host() else 12 * 3600
         resp.set_cookie(OWNER_COOKIE, make_owner_cookie(con), max_age=owner_ttl,
                         httponly=True, samesite="Lax", secure=is_public_host(), path="/")
@@ -563,13 +530,6 @@ def manifest():
     return send_from_directory(os.path.join(BASE, "static"), "manifest.webmanifest",
                                mimetype="application/manifest+json")
 
-# ----------------------------------------------------------------------------
-# WEB PUSH — notify the owner's phone on clock in/out.
-# No-payload Web Push: we sign a VAPID (ES256) JWT with the pure-python `ecdsa`
-# library (which installs cleanly on Termux, unlike `cryptography`). The push
-# carries no encrypted body; the phone's service worker fetches /api/push/latest
-# and shows the real message. Only the owner's logged-in phone can subscribe.
-# ----------------------------------------------------------------------------
 def _pb64u(b):
     import base64
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
@@ -579,8 +539,7 @@ def _pb64u_dec(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 def ensure_vapid(con):
-    """Create the VAPID keypair once and store it. Returns (priv_b64, pub_b64)
-    or ('','') if the ecdsa library isn't installed yet."""
+    """Create the VAPID keypair once and store it. Returns (priv_b64, pub_b64)"""
     priv = get_setting(con, "vapid_priv", "")
     pub = get_setting(con, "vapid_pub", "")
     if priv and pub:
@@ -613,8 +572,7 @@ def _vapid_header(priv_b64, pub_b64, endpoint, sub):
     return f"vapid t={jwt},k={pub_b64}"
 
 def send_push(con, title, body):
-    """Fire a no-payload push to every subscribed device. Records the message so
-    the service worker can fetch and display it. Prunes dead subscriptions."""
+    """Fire a no-payload push to every subscribed device. Records the message so"""
     if get_setting(con, "push_on_punch", "1") != "1":
         return 0
     priv, pub = ensure_vapid(con)
@@ -642,7 +600,7 @@ def send_push(con, title, body):
             con.execute("UPDATE push_subs SET last_ok=? WHERE id=?", (int(time.time()), s["id"]))
             sent += 1
         except urllib.error.HTTPError as e:
-            if e.code in (404, 410):          # subscription expired / unsubscribed
+            if e.code in (404, 410):
                 con.execute("DELETE FROM push_subs WHERE id=?", (s["id"],))
         except Exception:
             pass
@@ -753,9 +711,69 @@ def api_push_test():
                      "Push is working — you'll get these the moment someone clocks in or out.")
     return jsonify({"ok": True, "sent": sent})
 
-# ----------------------------------------------------------------------------
-# KIOSK API (no admin auth; never exposes PINs)
-# ----------------------------------------------------------------------------
+SALES_SOURCES = {"pos": "POS", "doordash": "DoorDash", "ubereats": "Uber Eats", "grubhub": "Grubhub"}
+
+def _today_key():
+    return datetime.now(TZ()).strftime("%Y-%m-%d")
+
+@app.route("/api/sales/ingest", methods=["POST"])
+def api_sales_ingest():
+    con = db()
+    d = request.get_json(force=True, silent=True) or {}
+    token = get_setting(con, "sales_token", "")
+    if not token or str(d.get("token", "")) != token:
+        return jsonify({"ok": False, "error": "bad token"}), 403
+    src = str(d.get("source", "")).lower().strip()
+    if src not in SALES_SOURCES:
+        return jsonify({"ok": False, "error": "unknown source"}), 400
+    day = str(d.get("day", "")).strip() or _today_key()
+
+    def num(x):
+        try:
+            return float(str(x).replace(",", "").replace("$", "").strip() or 0)
+        except Exception:
+            return 0.0
+    gross = num(d.get("gross")); net = num(d.get("net"))
+    try:
+        orders = int(float(d.get("orders") or 0))
+    except Exception:
+        orders = 0
+    if net == 0 and gross:
+        net = gross
+    con.execute("""INSERT INTO sales_live(source,day,gross,net,orders,updated) VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(source,day) DO UPDATE SET gross=excluded.gross, net=excluded.net,
+                     orders=excluded.orders, updated=excluded.updated""",
+                (src, day, gross, net, orders, int(time.time())))
+    con.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/sales/live")
+def api_sales_live():
+    require_owner()
+    con = db()
+    day = request.args.get("day") or _today_key()
+    rows = {r["source"]: dict(r) for r in con.execute("SELECT * FROM sales_live WHERE day=?", (day,)).fetchall()}
+    out = []
+    tot_net = tot_gross = 0.0; tot_orders = 0
+    for src, label in SALES_SOURCES.items():
+        r = rows.get(src)
+        if r:
+            tot_net += r["net"]; tot_gross += r["gross"]; tot_orders += r["orders"]
+        out.append({"source": src, "label": label,
+                    "net": r["net"] if r else None, "gross": r["gross"] if r else None,
+                    "orders": r["orders"] if r else None, "updated": r["updated"] if r else None})
+    return jsonify({"day": day, "channels": out,
+                    "total_net": round(tot_net, 2), "total_gross": round(tot_gross, 2),
+                    "total_orders": tot_orders,
+                    "token_set": bool(get_setting(con, "sales_token", "")),
+                    "enabled": get_setting(con, "sales_live", "1") == "1"})
+
+@app.route("/api/sales/token")
+def api_sales_token():
+    require_owner()
+    con = db()
+    return jsonify({"token": get_setting(con, "sales_token", ""), "lan_ip": lan_ip(), "port": str(PORT)})
+
 @app.route("/api/state")
 def api_state():
     con = db()
@@ -787,18 +805,18 @@ def api_punch():
     photo_b64 = data.get("photo")
     if photo_b64 and get_setting(con, "photo_on_punch") == "1":
         photo_name = save_photo(emp["id"], photo_b64)
-    if open_p:  # clock OUT
+    if open_p:
         con.execute("UPDATE punches SET clock_out=?, photo_out=? WHERE id=?", (now, photo_name, open_p["id"]))
         audit(con, emp["name"], "clock_out", f"punch {open_p['id']}")
         con.commit()
         action = "out"
-    else:       # clock IN
+    else:
         con.execute("""INSERT INTO punches(emp_id,clock_in,clock_out,source,note,photo,created_at)
                        VALUES(?,?,?,?,?,?,?)""", (emp["id"], now, None, "kiosk", "", photo_name, now))
         audit(con, emp["name"], "clock_in", "")
         con.commit()
         action = "in"
-    notify_punch_async(emp["name"], action, now)   # ping the owner's phone (non-blocking)
+    notify_punch_async(emp["name"], action, now)
     return jsonify({"ok": True, "action": action, "name": emp["name"], "time": now})
 
 def save_photo(emp_id, b64):
@@ -813,9 +831,6 @@ def save_photo(emp_id, b64):
     except Exception:
         return None
 
-# ----------------------------------------------------------------------------
-# ADMIN API
-# ----------------------------------------------------------------------------
 @app.route("/api/admin/login", methods=["POST"])
 def admin_login():
     data = request.get_json(force=True, silent=True) or {}
@@ -849,18 +864,15 @@ def admin_dashboard():
     wk = this_week_key()
     rows, tot = compute_week(con, wk)
     now = int(time.time())
-    # who's on now (with clock-in photo)
     open_p = con.execute("""SELECT p.*, e.name, e.rate FROM punches p JOIN employees e ON e.id=p.emp_id
                             WHERE p.clock_out IS NULL ORDER BY p.clock_in""").fetchall()
     on_now = [{"name": r["name"], "since": r["clock_in"], "photo": r["photo"],
                "elapsed_h": round((now - r["clock_in"]) / 3600.0, 2)} for r in open_p]
-    # today's hours + labor cost
     today_start = int(datetime.now(TZ()).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
     today_punches = con.execute("""SELECT p.clock_in, p.clock_out, e.rate FROM punches p
                                    JOIN employees e ON e.id=p.emp_id WHERE p.clock_in>=?""", (today_start,)).fetchall()
     today_hours = sum(((p["clock_out"] or now) - p["clock_in"]) / 3600.0 for p in today_punches)
     today_labor = sum(((p["clock_out"] or now) - p["clock_in"]) / 3600.0 * (p["rate"] or 0) for p in today_punches)
-    # recent clock in/out events (activity feed)
     rec = con.execute("""SELECT p.clock_in, p.clock_out, p.photo, p.photo_out, e.name
                          FROM punches p JOIN employees e ON e.id=p.emp_id
                          ORDER BY p.clock_in DESC LIMIT 25""").fetchall()
@@ -871,7 +883,6 @@ def admin_dashboard():
             events.append({"name": p["name"], "action": "out", "ts": p["clock_out"], "photo": p["photo_out"]})
     events.sort(key=lambda x: x["ts"], reverse=True)
     recent = events[:8]
-    # pace vs last week — same elapsed point (week-to-date) and same weekday last week
     wk_start, _ = week_bounds(wk)
     tw_h, tw_l = _labor_between(con, wk_start, now)
     lw_h, lw_l = _labor_between(con, wk_start - 7 * 86400, now - 7 * 86400)
@@ -881,7 +892,6 @@ def admin_dashboard():
         "wtd":   {"hours": tw_h, "labor": tw_l, "prev_hours": lw_h, "prev_labor": lw_l},
         "today": {"hours": td_h, "labor": td_l, "prev_hours": ltd_h, "prev_labor": ltd_l},
     }
-    # OT warnings: anyone within 15% of their threshold or over
     warn = [r for r in rows if r["ot"] > 0 or (r["hrs"] >= 0.85 * (
              (con.execute("SELECT ot_threshold FROM employees WHERE id=?", (r["id"],)).fetchone()[0]) or 40))]
     return jsonify({
@@ -937,7 +947,6 @@ def payroll_week_data(con, wk):
         rate = e["rate"] or 0.0
         otr = e["ot_rate"] if e["ot_rate"] is not None else rate
         thr = e["ot_threshold"] or 40
-        # daily in/out/hours, Mon..Sun
         days = []
         for i in range(7):
             ds = start + i * 86400; de = ds + 86400
@@ -962,8 +971,7 @@ def payroll_week_data(con, wk):
 PAYROLL_TEMPLATE = os.path.join(BASE, "templates", "payroll_template.xlsx")
 
 def generate_payroll_xlsx(con, wk):
-    """Fill the owner's OWN payroll workbook (formulas intact) with this week's employees
-    and their daily in/out times. All payroll/tip/Gusto math stays their formulas."""
+    """Fill the owner's OWN payroll workbook (formulas intact) with this week's employees"""
     import openpyxl
     start, end = week_bounds(wk)
     wb = openpyxl.load_workbook(PAYROLL_TEMPLATE)
@@ -1055,11 +1063,11 @@ def admin_edit_punch():
     ci, co = d.get("clock_in"), d.get("clock_out")
     if co is not None and ci is not None and co < ci:
         return jsonify({"ok": False, "error": "Clock-out is before clock-in"}), 400
-    if pid:  # edit
+    if pid:
         con.execute("UPDATE punches SET clock_in=?,clock_out=?,edited=1,note=? WHERE id=?",
                     (ci, co, d.get("note", ""), pid))
         audit(con, "admin", "edit_punch", f"punch {pid}")
-    else:    # add
+    else:
         emp = con.execute("SELECT * FROM employees WHERE id=?", (d.get("emp_id"),)).fetchone()
         if not emp:
             return jsonify({"ok": False, "error": "Unknown employee"}), 400
@@ -1084,12 +1092,11 @@ def admin_employees():
     require_admin()
     con = db()
     if request.method == "GET":
-        emps = con.execute("SELECT * FROM employees ORDER BY sort_order,name").fetchall()
+        emps = con.execute("SELECT * FROM employees WHERE active=1 ORDER BY sort_order,name").fetchall()
         return jsonify([dict(e) for e in emps])
     d = request.get_json(force=True, silent=True) or {}
     pin = str(d.get("pin", "")).strip()
     eid = d.get("id")
-    # unique active pin
     if pin:
         clash = con.execute("SELECT name FROM employees WHERE pin=? AND active=1 AND id IS NOT ?",
                             (pin, eid or -1)).fetchone()
@@ -1111,6 +1118,19 @@ def admin_employees():
                     (d.get("name", "New employee"), pin, email, ptype, float(d.get("rate") or 0), ot_rate,
                      float(d.get("ot_threshold") or 40), mx + 1, int(time.time())))
         audit(con, "admin", "add_employee", d.get("name", ""))
+    con.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/admin/employees/<int:eid>", methods=["DELETE"])
+def admin_employee_delete(eid):
+    require_admin()
+    con = db()
+    e = con.execute("SELECT name FROM employees WHERE id=?", (eid,)).fetchone()
+    if not e:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    con.execute("UPDATE employees SET active=0 WHERE id=?", (eid,))
+    con.execute("DELETE FROM sched_shifts WHERE emp_id=?", (eid,))
+    audit(con, "admin", "remove_employee", e["name"])
     con.commit()
     return jsonify({"ok": True})
 
@@ -1145,20 +1165,20 @@ def admin_settings():
     if request.method == "GET":
         rows = con.execute("SELECT key,value FROM settings").fetchall()
         s = {r["key"]: r["value"] for r in rows}
-        s.pop("smtp_pass", None)  # never send the password back
+        s.pop("smtp_pass", None)
         s["smtp_pass_set"] = "1" if get_setting(con, "smtp_pass") else "0"
-        s.pop("brevo_api_key", None)  # never send the API key back
+        s.pop("brevo_api_key", None)
         s["brevo_key_set"] = "1" if get_setting(con, "brevo_api_key") else "0"
-        s.pop("owner_pass_hash", None); s.pop("cookie_secret", None)  # never leak these
+        s.pop("owner_pass_hash", None); s.pop("cookie_secret", None)
         s["owner_login_set"] = "1" if get_setting(con, "owner_pass_hash") else "0"
         s["lan_ip"] = lan_ip()
         s["port"] = str(PORT)
         return jsonify(s)
     d = request.get_json(force=True, silent=True) or {}
     for k, v in d.items():
-        if k in ("smtp_pass", "brevo_api_key") and v == "":   # blank = keep existing
+        if k in ("smtp_pass", "brevo_api_key") and v == "":
             continue
-        if k == "owner_password":                 # set/replace the owner remote-login password
+        if k == "owner_password":
             if str(v):
                 set_setting(con, "owner_pass_hash", hash_pw(str(v)))
             continue
@@ -1190,7 +1210,6 @@ def admin_backup():
     path = make_backup()
     return jsonify({"ok": True, "path": os.path.basename(path)})
 
-# ---- one-click software update (git pull + safe restart) ----
 def _git(args, timeout=120):
     return subprocess.run(["git", "-C", BASE] + args, capture_output=True, text=True, timeout=timeout)
 
@@ -1226,7 +1245,6 @@ def admin_update():
             return jsonify({"ok": False, "error": "Couldn't fetch the update: " + out[-200:]})
         if "Already up to date" in out or "Already up-to-date" in out:
             return jsonify({"ok": True, "updated": False, "msg": "You're already on the latest version."})
-        # safety: make sure the new code even parses before we switch to it
         chk = subprocess.run([sys.executable, "-m", "py_compile", os.path.join(BASE, "app.py")],
                              capture_output=True, text=True)
         if chk.returncode != 0:
@@ -1236,7 +1254,6 @@ def admin_update():
                             "so your clock keeps running the current version."})
         new = _git(["rev-parse", "--short", "HEAD"]).stdout.strip()
         audit(con, "admin", "update", f"{old[:7]} -> {new}"); con.commit()
-        # re-exec into the new code a moment after this response is sent
         def _restart():
             time.sleep(1.3)
             try:
@@ -1248,19 +1265,14 @@ def admin_update():
     except Exception as ex:
         return jsonify({"ok": False, "error": f"Update failed: {ex}"})
 
-# ----------------------------------------------------------------------------
-# INVENTORY / ORDERING
-# ----------------------------------------------------------------------------
 import math
 
 INV_CATS = ["Frozen", "Cooler", "Produce", "Dry", "Paper", "Drinks", "Cleaning", "Specialty"]
 INV_VNAME = {"shahs": "Shah's (IMS)", "rd": "Restaurant Depot", "pfg": "PFG", "other": "Other"}
 
-# exact order of codes on ims.shahshalalfood.com/requisitions/add
 INV_IMS_ORDER = ["S4","B5","Philly4","PhillyC","HW","SN","SSN","SSBCF","KK","SBCF","ShahsFF","SPPF","SHR","SHB","SH6","SHUM","Fish","Chu M","WSP","SHS","SGS","SFAL","SC","SO","L","TO","CU","RO","GP","SB5","SAT","WS","SSWS","PANINI","BBQ","ShahsR","RM","MAYOH4","ChickP","BB","Fry","Oil","K","PCK","PCBC","T","MG4","PK","WATER","SGO","SHAHSP","SHAHSL","F","N","MF","LF","1","1LID","GB46","WP","SWP","LWP","CW","BBB","CBB","FFC","SHFL","SNB","AHALF","ALID","SHAHSPB","SP","KN","Straw","FS","TRP","SLB","STGB","NMB","NSB","SFS","SBLG","BMG","SBXLG","SBC","GS","969","Bleach","SLC","MOPS","SWMC","FLP","WPP","ST","PICKLES","TP","SLG","SBBB","SFALP","TS","LJ","SALTG","CA","CS","SPW","GPS","SRCS","CHBBQ","KBWS","LPS","SFB","SPOP","SFSB","PM"]
 INV_RANK = {c: i for i, c in enumerate(INV_IMS_ORDER)}
 
-# (code, name, category, unit, vendor, ims-code, rd-item#, price, starter-par)
 INV_CATALOG = [
  ("S4","Halal Gyro 4/10","Frozen","4/10 lb cones","shahs","S4","",118,2),
  ("B5","Beef Burgers","Frozen","10 lb box","shahs","B5","",45,5),
@@ -1505,9 +1517,6 @@ def inv_order_html(con, computed, counted_by, comment, ncount):
 def inventory_page():
     return render_template("inventory.html")
 
-# ----------------------------------------------------------------------------
-# SCHEDULE (shift planner + Kitchen/Front coverage)
-# ----------------------------------------------------------------------------
 def _hhmm_to_min(s):
     try:
         h, m = str(s).split(":"); return int(h) * 60 + int(m)
@@ -1526,7 +1535,7 @@ def _week_days(week_key_str):
 
 @app.route("/schedule")
 def schedule_page():
-    if not valid_owner_cookie(db()):      # owner-only
+    if not valid_owner_cookie(db()):
         return redirect("/owner/login")
     return render_template("schedule.html")
 
@@ -1565,7 +1574,7 @@ def api_sched_shift():
     if not day or not emp_id or sm is None or em is None:
         return jsonify({"ok": False, "error": "Pick a person, area, and times."}), 400
     if em <= sm:
-        em += 1440   # end is next morning (e.g. 5:00 PM – 12:30 AM close)
+        em += 1440
     if em - sm > 20 * 60:
         return jsonify({"ok": False, "error": "That shift is over 20 hours — check the times."}), 400
     sid = d.get("id")
@@ -1642,6 +1651,7 @@ def api_sched_email():
     days = _week_days(wk)
     d0 = date(*[int(x) for x in days[0].split("-")]); d6 = date(*[int(x) for x in days[6].split("-")])
     rng = f"{d0.strftime('%b %-d')} – {d6.strftime('%b %-d, %Y')}"
+    emp_filter = d.get("emp_id")
     emps = {e["id"]: dict(e) for e in con.execute("SELECT id,name,email FROM employees").fetchall()}
     by_emp = {}
     for s in con.execute("SELECT * FROM sched_shifts WHERE day>=? AND day<=? ORDER BY day,start_min",
@@ -1649,6 +1659,8 @@ def api_sched_email():
         by_emp.setdefault(s["emp_id"], []).append(s)
     sent = 0; skipped = []
     for eid, slist in by_emp.items():
+        if emp_filter and int(eid) != int(emp_filter):
+            continue
         e = emps.get(eid)
         if not e:
             continue
@@ -1685,7 +1697,7 @@ def api_sched_email():
 def inv_unlock():
     con = db()
     pw = str((request.get_json(force=True, silent=True) or {}).get("password", "")).strip()
-    if not (is_staff(con) or _inv_pw_ok(con, pw)):   # owner/manager already authenticated
+    if not (is_staff(con) or _inv_pw_ok(con, pw)):
         return jsonify({"ok": False, "error": "Wrong inventory password."}), 403
     items = [dict(r) for r in con.execute(
         "SELECT code,name,cat,unit,vendor,ims,rd,price,par,active FROM inv_items ORDER BY sort_order").fetchall()]
@@ -1775,9 +1787,6 @@ def admin_inv_count(cid):
     return jsonify({"id": r["id"], "ts": r["ts"], "counted_by": r["counted_by"],
                     "comment": r["comment"], "order_text": r["order_text"], "lines": lines})
 
-# ----------------------------------------------------------------------------
-# EMAIL
-# ----------------------------------------------------------------------------
 from email.mime.image import MIMEImage
 LOGO_EMAIL = os.path.join(BASE, "static", "logo_email.png")
 
@@ -1852,8 +1861,7 @@ def _send_brevo(con, to, subject, inner_html, text, tag="", attachments=None, cc
         return False, f"Could not reach the email service: {ex}"
 
 def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None, cc=None):
-    """Send as your own Gmail via the Gmail API over HTTPS (port 443) — no Brevo, no SMTP ports.
-    Credentials live in data/credentials.json ('gmail' block); set up once with get_gmail_token.py."""
+    """Send as your own Gmail via the Gmail API over HTTPS (port 443) — no Brevo, no SMTP ports."""
     import base64 as _b64
     g = (_creds.get("gmail") if _creds else {}) or {}
     cid = g.get("client_id", ""); csec = g.get("client_secret", ""); rtok = g.get("refresh_token", "")
@@ -1862,7 +1870,6 @@ def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None
         return False, "Gmail API isn't set up yet (data/credentials.json → gmail). See CREDENTIALS_SETUP.md."
     if not sender:
         return False, "No sender email set."
-    # 1) exchange the refresh token for a short-lived access token
     try:
         tok_data = urllib.parse.urlencode({
             "client_id": cid, "client_secret": csec,
@@ -1882,7 +1889,6 @@ def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None
         return False, f"Could not reach Google: {ex}"
     if not access:
         return False, "Google did not return an access token."
-    # 2) build the same rich MIME as the SMTP path (inline logo + any attachments)
     root = MIMEMultipart("mixed")
     root["Subject"] = subject; root["From"] = sender; root["To"] = to
     if cc:
@@ -1903,7 +1909,6 @@ def _send_gmail_api(con, to, subject, inner_html, text, tag="", attachments=None
         ap = MIMEApplication(data, _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         ap.add_header("Content-Disposition", "attachment", filename=fn); root.attach(ap)
     raw = _b64.urlsafe_b64encode(root.as_bytes()).decode()
-    # 3) send through the Gmail API
     try:
         sreq = urllib.request.Request(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
@@ -1927,8 +1932,7 @@ def _send(con, to, subject, inner_html, text, tag="", attachments=None, cc=None)
     if not to:
         return False, "No recipient address."
     if cc and cc.strip().lower() == (to or "").strip().lower():
-        cc = None   # don't CC the same address we're already sending to
-    # Web-API methods (port 443) — use these when the network blocks SMTP ports.
+        cc = None
     method = get_setting(con, "email_method", "smtp")
     if method == "brevo":
         return _send_brevo(con, to, subject, inner_html, text, tag, attachments=attachments, cc=cc)
@@ -1958,8 +1962,6 @@ def _send(con, to, subject, inner_html, text, tag="", attachments=None, cc=None)
         ap = MIMEApplication(data, _subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         ap.add_header("Content-Disposition", "attachment", filename=fn); root.attach(ap)
     raw = root.as_string()
-    # Try the configured port, then fall back to the other Gmail port/method.
-    # 587 = STARTTLS, 465 = implicit SSL. Some networks block one but allow the other.
     order = [port, 465 if port != 465 else 587]
     errors = []
     for p in order:
@@ -1988,7 +1990,6 @@ def _send(con, to, subject, inner_html, text, tag="", attachments=None, cc=None)
     audit(con, "system", "email_error", f'{tag}: {"; ".join(errors)[:160]}'); con.commit()
     return False, "Could not reach Gmail on this network (tried ports 587 and 465). " + " | ".join(errors)
 
-# ---- team weekly (owner) ----
 def team_table_html(con, rows, tot):
     t = ['<table style="border-collapse:collapse;width:100%">']
     t.append(f'<tr><th {TH}>Employee</th><th {THR}>Reg</th><th {THR}>OT</th><th {THR}>Total</th>'
@@ -2004,9 +2005,7 @@ def team_table_html(con, rows, tot):
     return "".join(t)
 
 def cash_wages_section(con, wk):
-    """(html, text_lines) for the 'Cash wages to pay' block at the bottom of the
-    weekly owner email: every cash-paid employee's wage, plus any overtime that's
-    handed out in cash, and the grand total of cash to hand out."""
+    """(html, text_lines) for the 'Cash wages to pay' block at the bottom of the"""
     try:
         check, cash = payroll_week_data(con, wk)
     except Exception:
@@ -2056,7 +2055,6 @@ def send_weekly_email(con, wk, test=False):
                      'font:13px Arial;margin-bottom:12px">Wage rates are placeholders — set real rates in the app (Manager → Team).</div>')
     inner.append('<h3 style="font:700 16px Arial;margin:4px 0 8px;color:#1a1206">Hours &amp; pay</h3>')
     inner.append(team_table_html(con, rows, tot))
-    # Overtime breakdown — OT hours x OT rate = OT pay, its own section
     ot_rows = [r for r in rows if r["ot"] > 0]
     if ot_rows:
         tot_ot_pay = round(sum(r["ot"] * r["ot_rate"] for r in ot_rows), 2)
@@ -2083,14 +2081,12 @@ def send_weekly_email(con, wk, test=False):
         for r in ot_rows:
             text.append(f'{r["name"][:14]:<14}{r["ot"]:>8.2f}{"$"+format(r["ot_rate"],".2f"):>9}{"$"+format(round(r["ot"]*r["ot_rate"],2),".2f"):>11}')
         text.append(f'{"TOTAL OT":<14}{"":>8}{"":>9}{"$"+format(tot_ot_pay,".2f"):>11}')
-    # Cash wages to pay — bottom section (cash employees + any OT paid in cash)
     _cash_html, _cash_text = cash_wages_section(con, wk)
     if _cash_html:
         inner.append(_cash_html)
         text.extend(_cash_text)
     subject = f'{"[TEST] " if test else ""}Weekly hours — {rng}'
     attachments = []
-    # Machine-readable hours feed for the Gusto auto-fill task (check employees only).
     if get_setting(con, "gusto_sync", "0") == "1":
         try:
             ptypes = {e["id"]: (e["pay_type"] or "check") for e in con.execute("SELECT id,pay_type FROM employees").fetchall()}
@@ -2101,7 +2097,6 @@ def send_weekly_email(con, wk, test=False):
             attachments.append((f"gusto_hours_{wk}.csv", sbuf.getvalue().encode()))
         except Exception as ex:
             audit(con, "system", "gusto_csv_error", str(ex)[:140]); con.commit()
-    # Attach the payroll workbook (your template, filled) so you can run payroll from anywhere.
     if get_setting(con, "attach_payroll", "1") == "1":
         try:
             attachments.append((f"payroll_{wk}.xlsx", generate_payroll_xlsx(con, wk)))
@@ -2119,7 +2114,6 @@ def send_weekly_email(con, wk, test=False):
                  tag=("test " if test else "")+"weekly "+wk, attachments=(attachments or None),
                  cc=get_setting(con, "report_cc", ""))
 
-# ---- daily digest (owner) ----
 def compute_day(con, d, rounded=False):
     """Per-employee hours for one local calendar date d (a date)."""
     start = int(datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=TZ()).timestamp())
@@ -2163,7 +2157,6 @@ def send_daily_email(con, day, test=False):
     return _send(con, get_setting(con, "report_email"), subject, inner, "\n".join(txt),
                  tag=("test " if test else "")+"daily "+day.isoformat())
 
-# ---- per-employee weekly (sent to each employee) ----
 def send_employee_weekly(con, wk, test=False, only_to=None):
     rows, _ = compute_week(con, wk, rounded=True)
     rng = week_range_label(wk)
@@ -2193,16 +2186,13 @@ def send_employee_weekly(con, wk, test=False, only_to=None):
                         tag=("test " if test else "")+"emp-weekly "+e["name"])
         if ok: sent += 1
         else: errors.append(f'{e["name"]}: {msg}')
-        if only_to: break   # test: just send one preview
+        if only_to: break
     if not emps:
         return False, "No active employees have an email address set (Manager → Team)."
     if errors:
         return sent > 0, f"Sent {sent}; issues: " + "; ".join(errors[:3])
     return True, f"Sent to {sent} employee(s)."
 
-# ----------------------------------------------------------------------------
-# BACKGROUND SCHEDULER (pure stdlib thread; survives on Termux)
-# ----------------------------------------------------------------------------
 def make_backup():
     stamp = datetime.now(TZ()).strftime("%Y%m%d_%H%M%S")
     dst = os.path.join(BACKUP, f"timeclock_{stamp}.db")
@@ -2211,7 +2201,6 @@ def make_backup():
         src.backup(dst_con); dst_con.close(); src.close()
     except Exception:
         shutil.copy2(DB, dst)
-    # keep last 30
     backups = sorted(os.listdir(BACKUP))
     for old in backups[:-30]:
         try: os.remove(os.path.join(BACKUP, old))
@@ -2254,8 +2243,7 @@ def _due(now_min, sched_min, window=180):
     return sched_min <= now_min < sched_min + window
 
 def scheduler_loop():
-    """Checks every 30s: nightly maintenance, daily digest, owner weekly, employee weekly.
-       Uses a catch-up window + 'already sent' guards so a brief tablet sleep won't skip a report."""
+    """Checks every 30s: nightly maintenance, daily digest, owner weekly, employee weekly."""
     while True:
         try:
             con = sqlite3.connect(DB); con.row_factory = sqlite3.Row
@@ -2263,14 +2251,12 @@ def scheduler_loop():
             now_min = now.hour * 60 + now.minute
             gi = lambda k, d: int(get_setting(con, k) or d)
 
-            # nightly maintenance (auto clock-out, backup, photo prune)
             if _due(now_min, gi("auto_clockout_run_hour", 3) * 60, window=120):
                 tag = now.date().isoformat()
                 if get_setting(con, "last_maint") != tag:
                     auto_clockout(con); make_backup(); prune_photos(con)
                     set_setting(con, "last_maint", tag); con.commit()
 
-            # daily digest — next morning, covering yesterday
             if get_setting(con, "daily_report") == "1" and _due(now_min, gi("daily_report_hour", 7) * 60 + gi("daily_report_min", 40)):
                 yesterday = (now.date() - timedelta(days=1))
                 if get_setting(con, "last_daily_report") != yesterday.isoformat():
@@ -2278,7 +2264,6 @@ def scheduler_loop():
                     if ok:
                         set_setting(con, "last_daily_report", yesterday.isoformat()); con.commit()
 
-            # owner weekly — on report_day, for the week that just ended
             if now.weekday() == gi("report_day", 0) and _due(now_min, gi("report_hour", 7) * 60 + gi("report_min", 50)):
                 last_wk = shift_add_days(this_week_key(), -7)
                 if get_setting(con, "last_report_week") != last_wk:
@@ -2286,7 +2271,6 @@ def scheduler_loop():
                     if ok:
                         set_setting(con, "last_report_week", last_wk); con.commit()
 
-            # per-employee weekly — on payroll day (Wednesday), for the week that ended Sunday
             if get_setting(con, "employee_reports") == "1" and now.weekday() == gi("payroll_day", 2) and _due(now_min, gi("payroll_hour", 8) * 60 + gi("payroll_min", 5)):
                 last_wk = shift_add_days(this_week_key(), -7)
                 if get_setting(con, "last_payroll_week") != last_wk:
@@ -2303,10 +2287,8 @@ def start_scheduler():
     t = threading.Thread(target=scheduler_loop, daemon=True)
     t.start()
 
-# ----------------------------------------------------------------------------
 def ensure_deps():
-    """Install optional libraries on first run if they're missing:
-    openpyxl (payroll Excel export) and ecdsa (VAPID signing for phone push)."""
+    """Install optional libraries on first run if they're missing:"""
     for mod, pkg in (("openpyxl", "openpyxl"), ("ecdsa", "ecdsa")):
         try:
             __import__(mod)
@@ -2321,8 +2303,10 @@ if __name__ == "__main__":
     ensure_deps()
     _c0 = sqlite3.connect(DB); _c0.row_factory = sqlite3.Row
     refresh_round(_c0)
-    try: ensure_vapid(_c0)      # create the push keypair now so the phone can subscribe
+    try: ensure_vapid(_c0)
     except Exception: pass
+    if not get_setting(_c0, "sales_token", ""):
+        set_setting(_c0, "sales_token", _pb64u(os.urandom(18))); _c0.commit()
     _c0.close()
     start_scheduler()
     ip = lan_ip()
